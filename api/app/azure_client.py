@@ -104,8 +104,11 @@ class AzureBlobClient:
             if ".." in filepath:
                 raise Exception("Invalid filepath")
             with open(os.path.join(self.base_filepath, filepath), "rb") as f:
-                f.seek(offset)
-                return f.read(length)
+                if length is not None and offset is not None:
+                    f.seek(offset)
+                    return f.read(length)
+                else:
+                    return f.read()
         elif self.awsAccessKeyId:  # S3
             session = aioboto3.Session()
             async with session.client(
