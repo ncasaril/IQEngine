@@ -1,0 +1,116 @@
+/**
+ * TileClient — Fetches server-rendered spectrogram tiles (PNG) for the recording view.
+ * This is a parallel rendering path that doesn't replace client-side FFT.
+ */
+
+export interface TileInfo {
+  total_ffts: number;
+  max_zoom: number;
+  tile_height: number;
+  fft_size: number;
+  total_samples: number;
+  data_type: string;
+  sample_rate_hz?: number;
+  center_freq_hz?: number;
+  zoom_levels: Record<
+    number,
+    {
+      num_tiles: number;
+      rows_per_tile_row: number;
+      effective_ffts: number;
+    }
+  >;
+}
+
+export interface TileResult {
+  image: ImageBitmap;
+  zoom: number;
+  timeIndex: number;
+  rows: number;
+  cols: number;
+}
+
+/**
+ * Fetch tile grid metadata for a recording.
+ */
+export async function fetchTileInfo(
+  account: string,
+  container: string,
+  filePath: string,
+  fftSize: number = 1024
+): Promise<TileInfo> {
+  const url = `/api/datasources/${account}/${container}/${filePath}/spectrogram/info?fft_size=${fftSize}`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch tile info: ${resp.status} ${resp.statusText}`);
+  }
+  return resp.json();
+}
+
+/**
+ * Fetch a single spectrogram tile as an ImageBitmap.
+ */
+export async function fetchTile(
+  account: string,
+  container: string,
+  filePath: string,
+  zoom: number,
+  timeIndex: number,
+  options: {
+    fftSize?: number;
+    window?: string;
+    cmap?: string;
+    magMin?: number;
+    magMax?: number;
+  } = {}
+): Promise<TileResult> {
+  const params = new URLSearchParams();
+  if (options.fftSize) params.set('fft_size', String(options.fftSize));
+  if (options.window) params.set('window', options.window);
+  if (options.cmap) params.set('cmap', options.cmap);
+  if (options.magMin !== undefined) params.set('mag_min', String(options.magMin));
+  if (options.magMax !== undefined) params.set('mag_max', String(options.magMax));
+
+  const url = `/api/datasources/${account}/${container}/${filePath}/spectrogram/tile/${zoom}/${timeIndex}?${params.toString()}`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch tile ${zoom}/${timeIndex}: ${resp.status}`);
+  }
+
+  const rows = parseInt(resp.headers.get('X-Tile-Rows') || '256', 10);
+  const cols = parseInt(resp.headers.get('X-Tile-Cols') || '1024', 10);
+
+  const blob = await resp.blob();
+  const image = await createImageBitmap(blob);
+
+  return { image, zoom, timeIndex, rows, cols };
+}
+
+/**
+ * Compute which tiles are visible for a given scroll position and viewport.
+ */
+export function getVisibleTiles(
+  tileInfo: TileInfo,
+  zoom: number,
+  viewportStartFFT: number,
+  viewportHeight: number
+): number[] {
+  const zoomLevel = tileInfo.zoom_levels[zoom];
+  if (!zoomLevel) return [];
+
+  const rowsPerTileRow = zoomLevel.rows_per_tile_row;
+  const tileHeight = tileInfo.tile_height;
+
+  // Which tile indices cover the viewport?
+  const effectiveStartFFT = Math.floor(viewportStartFFT / rowsPerTileRow);
+  const effectiveEndFFT = Math.ceil((viewportStartFFT + viewportHeight) / rowsPerTileRow);
+
+  const startTile = Math.floor(effectiveStartFFT / tileHeight);
+  const endTile = Math.ceil(effectiveEndFFT / tileHeight);
+
+  const tiles: number[] = [];
+  for (let i = startTile; i < Math.min(endTile, zoomLevel.num_tiles); i++) {
+    tiles.push(i);
+  }
+  return tiles;
+}

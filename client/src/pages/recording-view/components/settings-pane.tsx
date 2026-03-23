@@ -287,6 +287,20 @@ const SettingsPane = ({ currentFFT }) => {
         </div>
       </div>
 
+      <div id="toggleServerFFT">
+        <label className="label py-0">
+          <span className="label-text text-base">Server-Side FFT</span>
+          <input
+            type="checkbox"
+            className="toggle toggle-primary"
+            checked={context.serverSideFFT}
+            onChange={(e) => {
+              context.setServerSideFFT(e.target.checked);
+            }}
+          />
+        </label>
+      </div>
+
       <div id="toggleFreq">
         <label className="label py-0">
           <span className="label-text text-base">Display RF Freq</span>

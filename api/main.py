@@ -2,12 +2,14 @@ import logging
 import os
 from logging.config import dictConfig
 
+from app.agent_router import router as agent_router
 from app.config_router import router as config_router
 from app.converter_router import router as converter_router
 from app.database import db
 from app.datasources_router import router as datasources_router
 from app.iq_router import router as iq_router
 from app.plugins_router import router as plugins_router
+from app.spectrogram_router import router as spectrogram_router
 from app.status_router import router as status_router
 from app.users_router import router as users_router
 from dotenv import load_dotenv
@@ -90,6 +92,14 @@ app.include_router(config_router)
 app.include_router(plugins_router)
 app.include_router(users_router)
 app.include_router(converter_router)
+app.include_router(spectrogram_router)
+app.include_router(agent_router)
+
+# SDR router — only register when SDR feature is enabled
+if os.getenv("IQENGINE_SDR_ENABLED", "").strip() == "1":
+    from app.sdr_router import router as sdr_router
+
+    app.include_router(sdr_router)
 
 app.mount("/", SPAStaticFiles(directory="iqengine", html=True), name="iqengine")
 

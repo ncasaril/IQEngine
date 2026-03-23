@@ -42,6 +42,8 @@ interface SpectrogramContextProperties {
   setCanDownload: (canDownload: boolean) => void;
   selectedAnnotation?: number;
   setSelectedAnnotation: (selectedAnnotation: number) => void;
+  serverSideFFT: boolean;
+  setServerSideFFT: (serverSideFFT: boolean) => void;
 }
 
 export const SpectrogramContext = createContext<SpectrogramContextProperties>(null);
@@ -81,6 +83,7 @@ export function SpectrogramContextProvider({
   const [meta, setMeta] = useState<SigMFMetadata>(originMeta);
   const [canDownload, setCanDownload] = useState<boolean>(false);
   const [selectedAnnotation, setSelectedAnnotation] = useState<number>();
+  const [serverSideFFT, setServerSideFFT] = useState<boolean>(false);
   const { clearIQData } = useDataCacheFunctions(type, account, container, filePath, fftSize);
 
   function setPythonSnippet(pythonParameterSnippet: string) {
@@ -94,6 +97,11 @@ export function SpectrogramContextProvider({
     // If the recording size is real small, lower FFT size so it fills out vertically better
     if (meta && meta.getTotalSamples() < 100e3) {
       setFFTSize(256);
+    }
+
+    // Auto-enable server-side FFT for large recordings (>10M samples)
+    if (meta && meta.getTotalSamples() > 10e6 && type !== 'local') {
+      setServerSideFFT(true);
     }
   }, [originMeta]);
 
@@ -136,6 +144,8 @@ export function SpectrogramContextProvider({
         setCanDownload,
         selectedAnnotation,
         setSelectedAnnotation,
+        serverSideFFT,
+        setServerSideFFT,
       }}
     >
       {children}

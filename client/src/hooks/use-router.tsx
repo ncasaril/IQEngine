@@ -122,6 +122,13 @@ export function useRouter() {
           },
         },
         {
+          path: 'sdr',
+          async lazy() {
+            let { SDRPage } = await import('@/pages/sdr/sdr-page');
+            return { Component: SDRPage };
+          },
+        },
+        {
           index: true,
           async lazy() {
             let { Browser } = await import('@/pages/browser/browser');

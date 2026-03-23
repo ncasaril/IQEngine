@@ -1,0 +1,237 @@
+import io
+import math
+from functools import lru_cache
+from typing import Optional, Tuple
+
+import numpy as np
+from PIL import Image
+
+from helpers.samples import get_bytes_per_iq_sample, get_samples
+
+# Colormap LUTs — 256x3 uint8 arrays generated from matplotlib colormaps.
+# We store them here to avoid importing matplotlib at runtime (heavy + slow).
+_COLORMAP_CACHE = {}
+
+
+def _generate_colormap_lut(name: str) -> np.ndarray:
+    """Generate a 256x3 uint8 lookup table for a named colormap."""
+    if name in _COLORMAP_CACHE:
+        return _COLORMAP_CACHE[name]
+    try:
+        import matplotlib.cm as cm
+
+        cmap = cm.get_cmap(name)
+    except Exception:
+        import matplotlib.cm as cm
+
+        cmap = cm.get_cmap("viridis")
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    for i in range(256):
+        rgba = cmap(i / 255.0)
+        lut[i] = [int(rgba[0] * 255), int(rgba[1] * 255), int(rgba[2] * 255)]
+    _COLORMAP_CACHE[name] = lut
+    return lut
+
+
+def _get_window(name: str, size: int) -> np.ndarray:
+    """Return a window function array."""
+    if name == "hamming":
+        return np.hamming(size).astype(np.float32)
+    elif name == "hanning" or name == "hann":
+        return np.hanning(size).astype(np.float32)
+    elif name == "bartlett":
+        return np.bartlett(size).astype(np.float32)
+    elif name == "blackman":
+        return np.blackman(size).astype(np.float32)
+    else:  # rectangle / none
+        return np.ones(size, dtype=np.float32)
+
+
+def compute_spectrogram_db(samples: np.ndarray, fft_size: int, window: str = "hanning") -> np.ndarray:
+    """Compute spectrogram as dB magnitude matrix using vectorized FFT.
+
+    Args:
+        samples: Complex64 numpy array of IQ samples
+        fft_size: FFT size (must be power of 2)
+        window: Window function name
+
+    Returns:
+        2D numpy float32 array of shape (num_rows, fft_size) in dB scale
+    """
+    num_samples = len(samples)
+    num_rows = num_samples // fft_size
+    if num_rows == 0:
+        return np.zeros((0, fft_size), dtype=np.float32)
+
+    # Truncate to exact multiple of fft_size and reshape
+    truncated = samples[: num_rows * fft_size].reshape(num_rows, fft_size)
+
+    # Apply window function (broadcast across rows)
+    win = _get_window(window, fft_size)
+    windowed = truncated * win
+
+    # Vectorized FFT along axis=1, then fftshift
+    result = np.fft.fftshift(np.fft.fft(windowed, axis=1), axes=1)
+
+    # Normalize by FFT size (matches client-side: out = out.map(x => x / fftSize))
+    result = result / fft_size
+
+    # Amplitude → dB: 10*log10(|X|) — matches client-side which does sqrt(re²+im²) then 10*log10
+    # (NOT power spectrum 10*log10(|X|²) which would be 20*log10(|X|))
+    magnitudes_db = 10.0 * np.log10(np.abs(result) + 1e-12)
+
+    return magnitudes_db.astype(np.float32)
+
+
+def apply_colormap(magnitudes_db: np.ndarray, cmap: str = "viridis", mag_min: Optional[float] = None, mag_max: Optional[float] = None) -> np.ndarray:
+    """Apply colormap to dB magnitude array, returning RGB uint8 image.
+
+    Args:
+        magnitudes_db: 2D float32 array (num_rows x fft_size) in dB
+        cmap: Colormap name (matplotlib-compatible)
+        mag_min: Minimum dB value for scaling (auto if None)
+        mag_max: Maximum dB value for scaling (auto if None)
+
+    Returns:
+        3D uint8 array of shape (num_rows, fft_size, 3) — RGB image
+    """
+    if magnitudes_db.size == 0:
+        return np.zeros((0, 0, 3), dtype=np.uint8)
+
+    lut = _generate_colormap_lut(cmap)
+
+    if mag_min is None:
+        mag_min = float(np.percentile(magnitudes_db, 5))
+    if mag_max is None:
+        mag_max = float(np.percentile(magnitudes_db, 95))
+
+    if mag_max <= mag_min:
+        mag_max = mag_min + 1.0
+
+    # Scale to 0-255
+    scaled = (magnitudes_db - mag_min) * (255.0 / (mag_max - mag_min))
+    indices = np.clip(scaled, 0, 255).astype(np.uint8)
+
+    # Apply LUT
+    rgb = lut[indices]
+    return rgb
+
+
+def rgb_to_png(rgb: np.ndarray) -> bytes:
+    """Convert RGB uint8 array to PNG bytes."""
+    img = Image.fromarray(rgb, mode="RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=False)
+    return buf.getvalue()
+
+
+def compute_tile_info(total_samples: int, fft_size: int, tile_height: int = 256) -> dict:
+    """Compute tile grid metadata for a recording.
+
+    Args:
+        total_samples: Total number of IQ samples in the recording
+        fft_size: FFT size
+        tile_height: Number of FFT rows per tile (at max zoom)
+
+    Returns:
+        Dict with tile grid info
+    """
+    total_ffts = total_samples // fft_size
+    if total_ffts == 0:
+        return {"total_ffts": 0, "max_zoom": 0, "tile_height": tile_height, "fft_size": fft_size, "zoom_levels": {}}
+
+    max_zoom = max(0, math.ceil(math.log2(max(total_ffts / tile_height, 1))))
+
+    zoom_levels = {}
+    for z in range(max_zoom + 1):
+        # At each zoom level, how many FFT rows per tile row
+        rows_per_tile_row = 2 ** (max_zoom - z)
+        effective_ffts = math.ceil(total_ffts / rows_per_tile_row)
+        num_tiles = math.ceil(effective_ffts / tile_height)
+        zoom_levels[z] = {"num_tiles": num_tiles, "rows_per_tile_row": rows_per_tile_row, "effective_ffts": effective_ffts}
+
+    return {
+        "total_ffts": total_ffts,
+        "max_zoom": max_zoom,
+        "tile_height": tile_height,
+        "fft_size": fft_size,
+        "total_samples": total_samples,
+        "zoom_levels": zoom_levels,
+    }
+
+
+def compute_tile(
+    samples: np.ndarray,
+    fft_size: int,
+    zoom: int,
+    time_index: int,
+    tile_height: int = 256,
+    window: str = "hanning",
+    cmap: str = "viridis",
+    mag_min: Optional[float] = None,
+    mag_max: Optional[float] = None,
+    total_ffts: Optional[int] = None,
+    max_zoom: Optional[int] = None,
+) -> Tuple[bytes, dict]:
+    """Compute a single spectrogram tile as PNG.
+
+    Args:
+        samples: Full IQ samples array (complex64) — or the relevant slice
+        fft_size: FFT size
+        zoom: Zoom level (0 = most zoomed out, max_zoom = 1:1)
+        time_index: Tile index along time axis at this zoom level
+        tile_height: Rows per tile at max zoom
+        window: Window function name
+        cmap: Colormap name
+        mag_min: Min dB for colormap (auto if None)
+        mag_max: Max dB for colormap (auto if None)
+        total_ffts: Precomputed total FFTs (avoids recomputing)
+        max_zoom: Precomputed max zoom (avoids recomputing)
+
+    Returns:
+        Tuple of (PNG bytes, metadata dict with actual dimensions)
+    """
+    num_samples = len(samples)
+    if total_ffts is None:
+        total_ffts = num_samples // fft_size
+    if max_zoom is None:
+        max_zoom = max(0, math.ceil(math.log2(max(total_ffts / tile_height, 1))))
+
+    rows_per_tile_row = 2 ** (max_zoom - zoom)
+
+    # Which raw FFT rows does this tile cover?
+    start_fft = time_index * tile_height * rows_per_tile_row
+    end_fft = min(start_fft + tile_height * rows_per_tile_row, total_ffts)
+
+    if start_fft >= total_ffts:
+        # Empty tile
+        rgb = np.zeros((1, fft_size, 3), dtype=np.uint8)
+        return rgb_to_png(rgb), {"rows": 0, "cols": fft_size}
+
+    # Extract the relevant samples
+    sample_start = start_fft * fft_size
+    sample_end = end_fft * fft_size
+    tile_samples = samples[sample_start:sample_end]
+
+    # Compute full-resolution dB spectrogram for this tile's range
+    db = compute_spectrogram_db(tile_samples, fft_size, window)
+
+    if db.shape[0] == 0:
+        rgb = np.zeros((1, fft_size, 3), dtype=np.uint8)
+        return rgb_to_png(rgb), {"rows": 0, "cols": fft_size}
+
+    # Zoom-out: average groups of rows (preserves energy, no aliasing)
+    if rows_per_tile_row > 1 and db.shape[0] > tile_height:
+        num_output_rows = math.ceil(db.shape[0] / rows_per_tile_row)
+        # Pad to exact multiple if needed
+        padded_rows = num_output_rows * rows_per_tile_row
+        if padded_rows > db.shape[0]:
+            pad = np.full((padded_rows - db.shape[0], fft_size), np.nan, dtype=np.float32)
+            db = np.concatenate([db, pad], axis=0)
+        db = np.nanmean(db.reshape(num_output_rows, rows_per_tile_row, fft_size), axis=1)
+
+    # Apply colormap
+    rgb = apply_colormap(db, cmap=cmap, mag_min=mag_min, mag_max=mag_max)
+
+    png_bytes = rgb_to_png(rgb)
+    return png_bytes, {"rows": rgb.shape[0], "cols": rgb.shape[1]}

@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { useSpectrogram } from './hooks/use-spectrogram';
 import { Layer, Stage, Image } from 'react-konva';
 import { useGetImage } from './hooks/use-get-image';
+import { useServerSpectrogram } from './hooks/use-server-spectrogram';
 import { KonvaEventObject } from 'konva/lib/Node';
 import { RulerTop } from './components/ruler-top';
 import { RulerSide } from './components/ruler-side';
@@ -39,10 +40,14 @@ export function DisplaySpectrogram({ currentFFT, setCurrentFFT, currentTab }) {
     meta,
     setSpectrogramWidth,
     setSpectrogramHeight,
+    serverSideFFT,
   } = useSpectrogramContext();
 
   const { displayedIQ, spectrogramHeight } = useSpectrogram(currentFFT);
   const { width, height } = useWindowSize();
+
+  // Server-side tile rendering (parallel path)
+  const { image: serverImage, loading: serverLoading } = useServerSpectrogram(currentFFT);
 
   useEffect(() => {
     const spectrogramHeight = height - 450; // hand-tuned for now
@@ -52,7 +57,7 @@ export function DisplaySpectrogram({ currentFFT, setCurrentFFT, currentTab }) {
     setSpectrogramWidth(newSpectrogramWidth);
   }, [width, height]);
 
-  const { image, setIQData } = useGetImage(
+  const { image: clientImage, setIQData } = useGetImage(
     fftSize,
     spectrogramHeight,
     magnitudeMin,
@@ -60,6 +65,9 @@ export function DisplaySpectrogram({ currentFFT, setCurrentFFT, currentTab }) {
     colmap,
     windowFunction
   );
+
+  // Use server image when server-side FFT is enabled, otherwise use client-side
+  const image = serverSideFFT ? serverImage : clientImage;
 
   function handleWheel(evt: KonvaEventObject<WheelEvent>): void {
     evt.evt.preventDefault();
