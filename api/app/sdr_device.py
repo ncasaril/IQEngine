@@ -172,13 +172,15 @@ class SoapySDRDevice(SDRDeviceBase):
             results = SoapySDR.Device.enumerate()
             devices = []
             for r in results:
+                # SoapySDRKwargs exposes asdict() for safe conversion to a plain dict
+                info = r.asdict()
                 devices.append(
                     SDRDeviceInfo(
-                        driver=r.get("driver", "unknown"),
-                        label=r.get("label", r.get("driver", "unknown")),
-                        serial=r.get("serial", ""),
-                        hardware=r.get("hardware", ""),
-                        extra=dict(r),
+                        driver=info.get("driver", "unknown"),
+                        label=info.get("label", info.get("driver", "unknown")),
+                        serial=info.get("serial", ""),
+                        hardware=info.get("hardware", ""),
+                        extra=info,
                     )
                 )
             return devices
