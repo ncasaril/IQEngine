@@ -94,12 +94,13 @@ async def start_capture(req: CaptureRequest):
     device_lock.release()
 
     # Run capture in background thread (blocking SoapySDR calls)
-    asyncio.get_event_loop().run_in_executor(None, _run_capture, job)
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _run_capture, job, loop)
 
     return {"job_id": job_id, "status": "pending"}
 
 
-def _run_capture(job: CaptureJob):
+def _run_capture(job: CaptureJob, loop=None):
     """Execute capture in a background thread."""
     device = get_device()
     device_lock = get_device_lock()
@@ -131,6 +132,13 @@ def _run_capture(job: CaptureJob):
         job.completed_at = datetime.now(timezone.utc).isoformat()
         logger.info(f"Capture {job.job_id} complete: {job.filepath}")
 
+        # Auto-register in metadata DB so the recording is immediately browsable
+        if loop is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(_register_capture_metadata(job.filepath, job.config), loop)
+            except Exception as e:
+                logger.warning(f"Failed to auto-register capture: {e}")
+
     except Exception as e:
         logger.error(f"Capture {job.job_id} failed: {e}")
         job.status = "error"
@@ -141,6 +149,38 @@ def _run_capture(job: CaptureJob):
             pass
     finally:
         device_lock.release()
+
+
+async def _register_capture_metadata(filepath: str, config):
+    """Register a captured SigMF recording in the metadata DB so it appears in the browser."""
+    from .metadata import create
+
+    meta = {
+        "global": {
+            "core:datatype": "cf32_le",
+            "core:sample_rate": config.sample_rate,
+            "core:version": "1.0.0",
+            "core:description": f"SDR capture at {config.center_freq/1e6:.1f} MHz",
+            "traceability:origin": {
+                "type": "api",
+                "account": "local",
+                "container": "local",
+                "file_path": filepath,
+            },
+            "traceability:revision": 0,
+        },
+        "captures": [{"core:sample_start": 0, "core:frequency": config.center_freq, "core:datetime": datetime.now(timezone.utc).isoformat()}],
+        "annotations": [],
+    }
+
+    # Compute sample length from the file we just wrote
+    base_dir = os.getenv("IQENGINE_BACKEND_LOCAL_FILEPATH", "")
+    data_path = os.path.join(base_dir, filepath + ".sigmf-data")
+    if os.path.exists(data_path):
+        meta["global"]["traceability:sample_length"] = os.path.getsize(data_path) // 8  # cf32 = 8 bytes/sample
+
+    await create(meta, user=None)
+    logger.info(f"Registered capture in metadata DB: {filepath}")
 
 
 @router.get("/capture/{job_id}/status")

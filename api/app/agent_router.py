@@ -184,47 +184,6 @@ async def list_recordings(
     return AgentResponse(status="success", data={"recordings": recordings, "count": len(recordings)})
 
 
-@router.get("/recordings/{account}/{container}/{filepath:path}")
-async def get_recording(
-    filepath: str,
-    datasource: DataSource = Depends(datasources.get),
-    access_allowed=Depends(check_access),
-):
-    """Get full metadata for a specific recording."""
-    if access_allowed is None:
-        raise HTTPException(status_code=403, detail="No Access")
-    if not datasource:
-        raise HTTPException(status_code=404, detail="Datasource not found")
-
-    client = await _get_client(datasource)
-    from helpers.urlmapping import ApiType, get_file_name
-
-    meta_file = get_file_name(filepath, ApiType.METADATA)
-    try:
-        meta_bytes = await client.get_blob_content(filepath=meta_file)
-        meta = json.loads(meta_bytes)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Recording not found")
-
-    captures = meta.get("captures", [])
-    context = {}
-    if captures:
-        context["center_freq_hz"] = captures[0].get("core:frequency")
-    context["sample_rate_hz"] = meta.get("global", {}).get("core:sample_rate")
-    context["data_type"] = meta.get("global", {}).get("core:datatype")
-
-    # Calculate total samples from file size
-    try:
-        iq_file = get_file_name(filepath, ApiType.IQDATA)
-        file_length = await client.get_file_length(iq_file)
-        bytes_per_sample = get_bytes_per_iq_sample(meta["global"]["core:datatype"])
-        context["num_samples"] = file_length // bytes_per_sample
-    except Exception:
-        context["num_samples"] = meta.get("global", {}).get("traceability:sample_length")
-
-    return AgentResponse(status="success", data=meta, context=context)
-
-
 @router.get("/recordings/{account}/{container}/{filepath:path}/spectrogram")
 async def get_recording_spectrogram(
     filepath: str,
@@ -420,6 +379,50 @@ async def get_annotations(
     context = {"center_freq_hz": center_freq, "sample_rate_hz": sample_rate, "num_annotations": len(formatted)}
 
     return AgentResponse(status="success", data={"annotations": formatted}, context=context)
+
+
+# NOTE: this route must be defined AFTER the /spectrogram, /analysis, /annotations
+# sub-routes because filepath:path greedily matches slashes and would otherwise
+# swallow the sub-path suffix.
+@router.get("/recordings/{account}/{container}/{filepath:path}")
+async def get_recording(
+    filepath: str,
+    datasource: DataSource = Depends(datasources.get),
+    access_allowed=Depends(check_access),
+):
+    """Get full metadata for a specific recording."""
+    if access_allowed is None:
+        raise HTTPException(status_code=403, detail="No Access")
+    if not datasource:
+        raise HTTPException(status_code=404, detail="Datasource not found")
+
+    client = await _get_client(datasource)
+    from helpers.urlmapping import ApiType, get_file_name
+
+    meta_file = get_file_name(filepath, ApiType.METADATA)
+    try:
+        meta_bytes = await client.get_blob_content(filepath=meta_file)
+        meta = json.loads(meta_bytes)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    captures = meta.get("captures", [])
+    context = {}
+    if captures:
+        context["center_freq_hz"] = captures[0].get("core:frequency")
+    context["sample_rate_hz"] = meta.get("global", {}).get("core:sample_rate")
+    context["data_type"] = meta.get("global", {}).get("core:datatype")
+
+    # Calculate total samples from file size
+    try:
+        iq_file = get_file_name(filepath, ApiType.IQDATA)
+        file_length = await client.get_file_length(iq_file)
+        bytes_per_sample = get_bytes_per_iq_sample(meta["global"]["core:datatype"])
+        context["num_samples"] = file_length // bytes_per_sample
+    except Exception:
+        context["num_samples"] = meta.get("global", {}).get("traceability:sample_length")
+
+    return AgentResponse(status="success", data=meta, context=context)
 
 
 # --- SDR capture endpoints for agents ---
