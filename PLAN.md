@@ -5,13 +5,14 @@ This document tracks the implementation plan for extending IQEngine with:
 2. Live SDR capture via SoapySDR (HackRF, RTL-SDR, PlutoSDR)
 3. Structured REST API for AI agent consumption (MCP-ready)
 
-## Current Status: Milestones 1–7 + M6 shipped, M5 verified end-to-end with HackRF One
+## Current Status: M1–M7 + M6 complete, M8 and nice-to-haves remaining
 
 Commits on `main`:
 - `617e2b0` — initial implementation of all three components (M1–M7)
 - `165f052` — SoapySDR `enumerate()` segfault fix (use `asdict()`)
 - `7531686` — SDR capture auto-register + agent router ordering fix
-- (pending) — M5 verification: monitor metadata callback, shutdown hook, SoapySDR 0.8.1 upgrade
+- `f68b77c` — M5 verification: monitor metadata callback, shutdown hook, SoapySDR 0.8.1 upgrade
+- `1e87c5c` — M6: live waterfall WebSocket streaming with scrolling canvas
 
 ---
 
@@ -159,16 +160,18 @@ Code fixes applied:
 - Upgraded SoapySDR from 0.7.2 to **0.8.1** (source-built) — fixes intermittent segfault on process exit caused by static `std::shared_future` cache in `Device::enumerate()` racing with Python interpreter shutdown. HackRF module also rebuilt against 0.8 ABI.
 - `sdr_device.py`: `enumerate()` calls are unfiltered (all SDR types supported)
 
-### M6 — Live Waterfall WebSocket
+### M6 (done) — Live Waterfall WebSocket
 
+Verified on n20 with HackRF One (2026-04-14):
 - [x] `WebSocket /api/sdr/monitor/live` endpoint in `sdr_router.py` — streams spectrogram PNG strips per segment
 - [x] `WaterfallSubscriber` in `sdr_monitor.py` — monitor thread computes FFT + colormap + decimation, pushes PNG to async queues
-- [x] `LiveWaterfall.tsx` canvas component — connects WS, receives alternating JSON metadata + binary PNG frames, renders scrolling waterfall
+- [x] `LiveWaterfall.tsx` canvas component — connects WS, receives alternating JSON metadata + binary PNG frames, renders scrolling waterfall (newest at top)
 - [x] Integrated into `/sdr` page, replaces placeholder
 - [x] Vite proxy `ws: true` for dev WebSocket forwarding
+- [x] Requires `websockets` pip package for uvicorn WebSocket support
 
 Protocol: text frame (config on connect, strip metadata per segment) + binary frame (PNG).
-Query params: `fft_size`, `cmap`, `max_rows` (strip height after decimation).
+Query params: `fft_size`, `cmap`, `max_rows` (strip height after decimation, default 128).
 
 ### M8 — GPU Acceleration & Tile Caching
 
