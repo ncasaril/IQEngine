@@ -223,12 +223,19 @@ async def start_monitor(req: MonitorStartRequest):
 
     base_dir = os.getenv("IQENGINE_BACKEND_LOCAL_FILEPATH", os.path.join(os.getcwd(), "iqengine"))
 
+    # Wire up metadata registration so each segment is browsable immediately
+    loop = asyncio.get_event_loop()
+
+    def _register_segment_callback(filepath, cfg):
+        asyncio.run_coroutine_threadsafe(_register_capture_metadata(filepath, cfg), loop)
+
     runner = MonitorRunner(
         session_id=session_id,
         config=config,
         segment_duration_s=req.segment_duration_s,
         max_segments=req.max_segments,
         output_base_dir=base_dir,
+        register_metadata_callback=_register_segment_callback,
     )
 
     monitors[session_id] = runner

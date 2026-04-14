@@ -5,12 +5,13 @@ This document tracks the implementation plan for extending IQEngine with:
 2. Live SDR capture via SoapySDR (HackRF, RTL-SDR, PlutoSDR)
 3. Structured REST API for AI agent consumption (MCP-ready)
 
-## Current Status: Milestones 1–7 shipped & verified end-to-end with a real HackRF One
+## Current Status: Milestones 1–7 shipped, M5 verified end-to-end with HackRF One
 
 Commits on `main`:
 - `617e2b0` — initial implementation of all three components (M1–M7)
 - `165f052` — SoapySDR `enumerate()` segfault fix (use `asdict()`)
 - `7531686` — SDR capture auto-register + agent router ordering fix
+- (pending) — M5 verification: monitor metadata callback, shutdown hook, SoapySDR 0.8.1 upgrade
 
 ---
 
@@ -107,14 +108,14 @@ IQENGINE_BACKEND_LOCAL_FILEPATH="/tmp/iqengine_testdata"
 IQENGINE_CONNECTION_INFO={"settings": [{"name": "Local Test Data", "containerName": "local", "accountName": "local", "description": "Local test recordings"}]}
 IQENGINE_FEATURE_FLAGS={"displayIQEngineGitHub": true}
 IQENGINE_SDR_ENABLED=1
-SOAPY_SDR_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/SoapySDR/modules0.7
+SOAPY_SDR_PLUGIN_PATH=lib/SoapySDR/modules0.8
 ```
 
 ### Start both servers
 
 ```bash
 # In one tmux session:
-cd /home/niklas/git/IQEngine/api && .venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 5000
+cd /home/niklas/git/IQEngine/api && LD_LIBRARY_PATH=.venv/lib .venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 5000
 
 # In another:
 cd /home/niklas/git/IQEngine/client && npm start -- --host
@@ -142,15 +143,20 @@ curl 'http://n20:5000/api/agent/recordings/local/local/multi_signal_915MHz/analy
 
 ## Remaining milestones
 
-### M5 (in progress) — Continuous Monitoring end-to-end verification
+### M5 (done) — Continuous Monitoring end-to-end verification
 
-Code is done (`sdr_monitor.py`, `/api/sdr/monitor/*` endpoints) but we only smoke-tested it.
-Need to:
-- [ ] Start monitor from `/sdr` page UI, confirm segments appear in `sdr_captures/monitor_{id}/`
-- [ ] Retune mid-capture, confirm next segment uses new freq
-- [ ] Auto-register each segment in metadata DB (currently only on-demand captures do this)
-- [ ] Verify eviction of oldest segments works
-- [ ] Clean shutdown on API stop (monitor thread must release device lock)
+All items verified on n20 with HackRF One (2026-04-14):
+- [x] Start monitor from `/sdr` page UI, segments appear in `sdr_captures/monitor_{id}/`
+- [x] Retune mid-capture (915→433 MHz), next segment uses new freq
+- [x] Auto-register each segment in metadata DB (wired up `register_metadata_callback` in `start_monitor()`)
+- [x] Eviction of oldest segments works (set max_segments=5, confirmed indices 0–1 deleted)
+- [x] Clean shutdown on API stop (shutdown event handler stops monitors, releases device lock)
+
+Code fixes applied:
+- `sdr_router.py`: pass `register_metadata_callback` to `MonitorRunner` via `asyncio.run_coroutine_threadsafe`
+- `main.py`: add `_shutdown_sdr_monitors` shutdown event handler with `SoapySDR.unloadModules()` cleanup
+- Upgraded SoapySDR from 0.7.2 to **0.8.1** (source-built) — fixes intermittent segfault on process exit caused by static `std::shared_future` cache in `Device::enumerate()` racing with Python interpreter shutdown. HackRF module also rebuilt against 0.8 ABI.
+- `sdr_device.py`: `enumerate()` calls are unfiltered (all SDR types supported)
 
 ### M6 — Live Waterfall WebSocket
 
@@ -182,9 +188,10 @@ The `/sdr` page has a placeholder for live waterfall. Need to:
 ## Known issues / quirks
 
 - **Python 3.8 + repo code** — the repo uses PEP 604 `X | None` and `match` statements, which require Python 3.10+. Use pyenv 3.11 on n20.
-- **SoapySDR bindings ABI** — apt's `python3-soapysdr` is compiled for the system Python (3.8 on Ubuntu 20.04). If you upgrade the venv Python version, you must rebuild the bindings against the new Python headers.
-- **SoapySDR plugin search path** — our source-built SoapySDR looks in `/usr/local/lib/SoapySDR/modules0.7` by default. Set `SOAPY_SDR_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/SoapySDR/modules0.7` in `.env` to find the system HackRF module.
-- **`SoapySDR.Device.enumerate()` iteration segfaults** on some bindings versions. Always use `r.asdict()` — never `{k: r[k] for k in r.keys()}`. See commit `165f052`.
+- **SoapySDR 0.8.1 (source-built)** — both `libSoapySDR.so.0.8` and `_SoapySDR.so` Python bindings are built from source (in `/tmp/soapybuild/SoapySDR-soapy-sdr-0.8.1/`) against pyenv Python 3.11. The shared library lives at `api/.venv/lib/libSoapySDR.so.0.8` and requires `LD_LIBRARY_PATH=.venv/lib` when starting the API. The HackRF module is rebuilt against 0.8 ABI and lives at `api/lib/SoapySDR/modules0.8/`.
+- **SoapySDR plugin search path** — set `SOAPY_SDR_PLUGIN_PATH=lib/SoapySDR/modules0.8` in `.env`. To add more SDR backends (RTL-SDR, PlutoSDR, etc.), rebuild the corresponding SoapySDR module against the 0.8 headers at `/tmp/soapy081_install/` and place the `.so` in `api/lib/SoapySDR/modules0.8/`.
+- **SoapySDR enumerate() segfault (fixed)** — SoapySDR 0.7.2 had an intermittent segfault caused by static `std::shared_future` objects in the enumerate cache racing with Python interpreter shutdown. Root cause: `lib/Factory.cpp` uses `std::async(std::launch::async, ...)` with a static 1-second cache; static destructor order is undefined and can race with Python's `atexit` handlers. Fixed by upgrading to 0.8.1 which rewrote the cleanup path. Belt-and-suspenders: the shutdown handler also calls `SoapySDR.unloadModules()`.
+- **`SoapySDR.Device.enumerate()` iteration** — always use `r.asdict()` on enumerate results, never `dict(r)` or manual key iteration (see commit `165f052`).
 - **DC spike** on HackRF captures is expected — it's a direct-conversion receiver. Future work: DC offset correction in `spectrogram_engine.py` (subtract mean before FFT) as an opt-in flag.
 - **macOS port 5000** is used by Control Center (AirPlay Receiver). On a Mac dev box, use port 5001 and update `vite.config.ts` proxy target accordingly. On n20 (Ubuntu), port 5000 is free.
 - **Vite port 3000** binds to `0.0.0.0` only when you pass `--host` (the `start` script already does this via `vite --host`).

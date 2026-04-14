@@ -101,6 +101,23 @@ if os.getenv("IQENGINE_SDR_ENABLED", "").strip() == "1":
 
     app.include_router(sdr_router)
 
+    async def _shutdown_sdr_monitors():
+        from app.sdr_monitor import get_active_monitors
+
+        for mid, m in get_active_monitors().items():
+            if m.status == "running":
+                m.stop()
+        # Clean up SoapySDR module state before Python interpreter shutdown
+        # to avoid static destructor races (segfaults on exit).
+        try:
+            import SoapySDR
+
+            SoapySDR.unloadModules()
+        except Exception:
+            pass
+
+    app.add_event_handler("shutdown", _shutdown_sdr_monitors)
+
 app.mount("/", SPAStaticFiles(directory="iqengine", html=True), name="iqengine")
 
 app.add_event_handler("startup", db)  # connect to mongodb or set up in-memory db
