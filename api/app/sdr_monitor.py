@@ -1,6 +1,8 @@
 """Continuous SDR monitoring with rolling segment capture."""
 
+import asyncio
 import logging
+import math
 import os
 import queue
 import threading
@@ -11,6 +13,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import numpy as np
+
+from helpers.spectrogram_engine import apply_colormap, compute_spectrogram_db, rgb_to_png
 
 from .sdr_device import SDRConfig, SDRDeviceBase, get_device, get_device_lock, write_sigmf_recording
 
@@ -40,6 +44,18 @@ class MonitorSession:
     stopped_at: Optional[str] = None
 
 
+@dataclass
+class WaterfallSubscriber:
+    """A WebSocket subscriber that receives live spectrogram strips."""
+    queue: asyncio.Queue
+    loop: asyncio.AbstractEventLoop
+    fft_size: int = 1024
+    cmap: str = "viridis"
+    max_rows: int = 64
+    mag_min: Optional[float] = None
+    mag_max: Optional[float] = None
+
+
 class MonitorRunner:
     """Runs continuous SDR capture in a dedicated thread."""
 
@@ -66,7 +82,8 @@ class MonitorRunner:
         self._lock = threading.Lock()
         self._status = "pending"
         self._error: Optional[str] = None
-        self._websocket_subscribers: List = []
+        self._waterfall_subscribers: List[WaterfallSubscriber] = []
+        self._waterfall_lock = threading.Lock()
 
     @property
     def status(self) -> str:
@@ -105,12 +122,53 @@ class MonitorRunner:
             cmd["sample_rate"] = sample_rate
         self._retune_queue.put(cmd)
 
-    def add_websocket_subscriber(self, ws):
-        self._websocket_subscribers.append(ws)
+    def add_waterfall_subscriber(self, subscriber: WaterfallSubscriber):
+        with self._waterfall_lock:
+            self._waterfall_subscribers.append(subscriber)
 
-    def remove_websocket_subscriber(self, ws):
-        if ws in self._websocket_subscribers:
-            self._websocket_subscribers.remove(ws)
+    def remove_waterfall_subscriber(self, subscriber: WaterfallSubscriber):
+        with self._waterfall_lock:
+            if subscriber in self._waterfall_subscribers:
+                self._waterfall_subscribers.remove(subscriber)
+
+    def _notify_waterfall_subscribers(self, samples: np.ndarray, segment_index: int):
+        """Compute spectrogram strips and push to all WebSocket subscribers."""
+        with self._waterfall_lock:
+            subscribers = list(self._waterfall_subscribers)
+        if not subscribers:
+            return
+
+        for sub in subscribers:
+            try:
+                db = compute_spectrogram_db(samples, sub.fft_size)
+                if db.shape[0] == 0:
+                    continue
+
+                # Decimate rows if needed
+                if db.shape[0] > sub.max_rows:
+                    factor = math.ceil(db.shape[0] / sub.max_rows)
+                    n_out = math.ceil(db.shape[0] / factor)
+                    padded = n_out * factor
+                    if padded > db.shape[0]:
+                        pad = np.full((padded - db.shape[0], sub.fft_size), np.nan, dtype=np.float32)
+                        db = np.concatenate([db, pad], axis=0)
+                    db = np.nanmean(db.reshape(n_out, factor, sub.fft_size), axis=1)
+
+                rgb = apply_colormap(db, cmap=sub.cmap, mag_min=sub.mag_min, mag_max=sub.mag_max)
+                png_bytes = rgb_to_png(rgb)
+
+                # Push to subscriber's async queue from this thread
+                sub.loop.call_soon_threadsafe(sub.queue.put_nowait, {
+                    "type": "strip",
+                    "rows": rgb.shape[0],
+                    "cols": rgb.shape[1],
+                    "segment_index": segment_index,
+                    "center_freq_hz": self.config.center_freq,
+                    "sample_rate_hz": self.config.sample_rate,
+                    "png": png_bytes,
+                })
+            except Exception as e:
+                logger.warning(f"Failed to send waterfall strip to subscriber: {e}")
 
     def _run(self):
         """Main monitor loop running in dedicated thread."""
@@ -174,6 +232,9 @@ class MonitorRunner:
                         old = self._segments.pop(0)
                         self._evict_segment(old)
 
+                # Push spectrogram strip to live waterfall subscribers
+                self._notify_waterfall_subscribers(samples, segment_index)
+
                 # Register metadata in DB (if callback provided)
                 if self.register_metadata_callback:
                     try:
@@ -195,6 +256,13 @@ class MonitorRunner:
             device_lock.release()
             if self._status != "error":
                 self._status = "stopped"
+            # Notify waterfall subscribers that monitor has stopped
+            with self._waterfall_lock:
+                for sub in self._waterfall_subscribers:
+                    try:
+                        sub.loop.call_soon_threadsafe(sub.queue.put_nowait, None)
+                    except Exception:
+                        pass
 
     def _evict_segment(self, segment: MonitorSegment):
         """Remove old segment files from disk."""

@@ -1,17 +1,18 @@
 """SDR capture and monitoring endpoints."""
 
 import asyncio
+import json
 import logging
 import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from .sdr_device import CaptureJob, SDRConfig, get_capture_jobs, get_device, get_device_lock, write_sigmf_recording
-from .sdr_monitor import MonitorRunner, get_active_monitors
+from .sdr_monitor import MonitorRunner, WaterfallSubscriber, get_active_monitors
 
 logger = logging.getLogger("api")
 
@@ -298,3 +299,68 @@ async def get_monitor_status():
         "segments": [{"index": s.index, "filepath": s.filepath, "center_freq": s.center_freq, "timestamp": s.timestamp, "num_samples": s.num_samples} for s in segments[-10:]],  # last 10
         "error": runner.error,
     }
+
+
+@router.websocket("/monitor/live")
+async def live_waterfall(
+    ws: WebSocket,
+    fft_size: int = 1024,
+    cmap: str = "viridis",
+    max_rows: int = 64,
+):
+    """Stream live spectrogram strips from the active monitor session.
+
+    Query params: fft_size, cmap, max_rows (max rows per strip).
+    Sends: text frame (JSON config), then alternating text (metadata) + binary (PNG) per segment.
+    """
+    await ws.accept()
+
+    monitors = get_active_monitors()
+    running = [(mid, m) for mid, m in monitors.items() if m.status == "running"]
+    if not running:
+        await ws.send_json({"type": "error", "error": "No active monitor session"})
+        await ws.close()
+        return
+
+    session_id, runner = running[0]
+    loop = asyncio.get_event_loop()
+    q: asyncio.Queue = asyncio.Queue()
+    subscriber = WaterfallSubscriber(
+        queue=q,
+        loop=loop,
+        fft_size=fft_size,
+        cmap=cmap,
+        max_rows=max_rows,
+    )
+    runner.add_waterfall_subscriber(subscriber)
+
+    try:
+        # Send initial config
+        await ws.send_json({
+            "type": "config",
+            "session_id": session_id,
+            "fft_size": fft_size,
+            "cmap": cmap,
+            "max_rows": max_rows,
+            "center_freq_hz": runner.config.center_freq,
+            "sample_rate_hz": runner.config.sample_rate,
+        })
+
+        while True:
+            data = await q.get()
+            if data is None:
+                # Monitor stopped
+                await ws.send_json({"type": "stopped"})
+                break
+
+            # data is a dict with "type", "rows", "cols", "png", etc.
+            png_bytes = data.pop("png")
+            await ws.send_json(data)  # metadata text frame
+            await ws.send_bytes(png_bytes)  # PNG binary frame
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"Live waterfall WS error: {e}")
+    finally:
+        runner.remove_waterfall_subscriber(subscriber)

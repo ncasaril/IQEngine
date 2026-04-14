@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { LiveWaterfall } from './LiveWaterfall';
 
 interface SDRDevice {
   driver: string;
@@ -51,8 +52,6 @@ export function SDRPage() {
   const [captureStatus, setCaptureStatus] = useState<string>('');
   const [monitorStatus, setMonitorStatus] = useState<MonitorStatus | null>(null);
   const [error, setError] = useState<string>('');
-  const [liveImage, setLiveImage] = useState<string | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
 
   // Fetch devices on mount
   useEffect(() => {
@@ -339,17 +338,17 @@ export function SDRPage() {
         )}
       </div>
 
-      {/* Live Waterfall placeholder */}
+      {/* Live Waterfall */}
       {monitorStatus?.status === 'running' && (
         <div className="card bg-base-200 p-4">
           <h2 className="text-lg font-bold mb-2">Live Waterfall</h2>
-          {liveImage ? (
-            <img src={liveImage} alt="Live waterfall" className="w-full" />
-          ) : (
-            <div className="h-64 bg-black flex items-center justify-center text-gray-500">
-              Live waterfall will appear here when WebSocket streaming is connected
-            </div>
-          )}
+          <LiveWaterfall
+            active={monitorStatus?.status === 'running'}
+            fftSize={1024}
+            cmap="viridis"
+            maxRows={128}
+            height={800}
+          />
         </div>
       )}
     </div>

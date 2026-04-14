@@ -5,7 +5,7 @@ This document tracks the implementation plan for extending IQEngine with:
 2. Live SDR capture via SoapySDR (HackRF, RTL-SDR, PlutoSDR)
 3. Structured REST API for AI agent consumption (MCP-ready)
 
-## Current Status: Milestones 1–7 shipped, M5 verified end-to-end with HackRF One
+## Current Status: Milestones 1–7 + M6 shipped, M5 verified end-to-end with HackRF One
 
 Commits on `main`:
 - `617e2b0` — initial implementation of all three components (M1–M7)
@@ -73,6 +73,7 @@ Commits on `main`:
 - `client/src/pages/recording-view/components/settings-pane.tsx` — UI toggle for Server-Side FFT
 - `client/src/pages/recording-view/recording-view.tsx` — conditional client/server image rendering
 - `client/src/pages/sdr/sdr-page.tsx` — full SDR control page with capture + monitoring forms
+- `client/src/pages/sdr/LiveWaterfall.tsx` — canvas-based live waterfall via WebSocket
 - `client/src/hooks/use-router.tsx` — added `/sdr` route
 
 ---
@@ -160,11 +161,14 @@ Code fixes applied:
 
 ### M6 — Live Waterfall WebSocket
 
-The `/sdr` page has a placeholder for live waterfall. Need to:
-- [ ] Add `WebSocket /api/datasources/{a}/{c}/{p}/spectrogram/live` endpoint to `spectrogram_router.py`
-- [ ] Monitor thread pushes PNG row strips to WS subscribers when a new segment lands
-- [ ] New hook `use-live-spectrogram.tsx` on the client maintains a circular buffer
-- [ ] Konva scrolling waterfall component
+- [x] `WebSocket /api/sdr/monitor/live` endpoint in `sdr_router.py` — streams spectrogram PNG strips per segment
+- [x] `WaterfallSubscriber` in `sdr_monitor.py` — monitor thread computes FFT + colormap + decimation, pushes PNG to async queues
+- [x] `LiveWaterfall.tsx` canvas component — connects WS, receives alternating JSON metadata + binary PNG frames, renders scrolling waterfall
+- [x] Integrated into `/sdr` page, replaces placeholder
+- [x] Vite proxy `ws: true` for dev WebSocket forwarding
+
+Protocol: text frame (config on connect, strip metadata per segment) + binary frame (PNG).
+Query params: `fft_size`, `cmap`, `max_rows` (strip height after decimation).
 
 ### M8 — GPU Acceleration & Tile Caching
 
