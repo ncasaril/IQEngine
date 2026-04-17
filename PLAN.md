@@ -4,8 +4,9 @@ This document tracks the implementation plan for extending IQEngine with:
 1. Server-side spectrogram tiles (offload FFT to backend)
 2. Live SDR capture via SoapySDR (HackRF, RTL-SDR, PlutoSDR)
 3. Structured REST API for AI agent consumption (MCP-ready)
+4. MCP stdio server wrapping the agent API (`api/mcp_server/`)
 
-## Current Status: M1–M7 + M6 complete, M8 and nice-to-haves remaining
+## Current Status: M1–M7 + M6 + MCP server complete, M8 and nice-to-haves remaining
 
 Commits on `main`:
 - `617e2b0` — initial implementation of all three components (M1–M7)
@@ -172,6 +173,15 @@ Verified on n20 with HackRF One (2026-04-14):
 
 Protocol: text frame (config on connect, strip metadata per segment) + binary frame (PNG).
 Query params: `fft_size`, `cmap`, `max_rows` (strip height after decimation, default 128).
+
+### MCP server (done 2026-04-17)
+
+- [x] `api/mcp_server/` — stdio MCP server (FastMCP) wrapping `/api/agent/*`
+- [x] Separate venv at `api/mcp_server/.venv` to avoid clobbering the API's pinned deps (mcp 1.27 requires pydantic>=2.11, starlette>=0.49; API is on pydantic 2.7 + starlette 0.37)
+- [x] 15 tools: `list_recordings`, `get_recording`, `get_spectrogram`, `analyze_recording`, `get_annotations`, `capture`, `capture_and_analyze`, `tune_sdr`, `start_monitor`, `get_job_status`, `get_job_events`, `cancel_job`, `run_plugin`, `list_capabilities`, `list_sdr_devices`
+- [x] Config via `IQENGINE_API_URL` (default `http://localhost:5000`) and `IQENGINE_MCP_TIMEOUT` (default 120s)
+- [x] Launcher: `api/mcp_server/run.sh` — stdio transport
+- [x] Registered with Claude Code at user scope: `claude mcp add -s user iqengine /home/niklas/git/IQEngine/api/mcp_server/run.sh`
 
 ### M8 — GPU Acceleration & Tile Caching
 
