@@ -172,7 +172,12 @@ export function SDRPage() {
 
   return (
     <div className="p-4 max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold mb-4">SDR Control</h1>
+      <div className="flex items-baseline justify-between mb-4">
+        <h1 className="text-2xl font-bold">SDR Control</h1>
+        <a href="/sdr/live" className="btn btn-sm btn-primary">
+          Open Live View →
+        </a>
+      </div>
 
       {error && (
         <div className="alert alert-error mb-4">

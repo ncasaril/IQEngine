@@ -129,6 +129,13 @@ export function useRouter() {
           },
         },
         {
+          path: 'sdr/live',
+          async lazy() {
+            let { SDRLivePage } = await import('@/pages/sdr/live-page');
+            return { Component: SDRLivePage };
+          },
+        },
+        {
           index: true,
           async lazy() {
             let { Browser } = await import('@/pages/browser/browser');
