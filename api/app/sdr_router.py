@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconn
 from pydantic import BaseModel, Field
 
 from .sdr_device import CaptureJob, SDRConfig, get_capture_jobs, get_device, get_device_lock, write_sigmf_recording
-from .sdr_monitor import MonitorRunner, WaterfallSubscriber, get_active_monitors
+from .sdr_monitor import MonitorRunner, SpectrumSubscriber, WaterfallSubscriber, get_active_monitors
 
 logger = logging.getLogger("api")
 
@@ -35,9 +35,10 @@ class MonitorStartRequest(BaseModel):
     center_freq: float = Field(..., description="Center frequency in Hz")
     sample_rate: float = Field(2e6, description="Sample rate in Hz")
     gain: float = Field(40.0, description="Gain in dB")
-    segment_duration_s: float = Field(10.0, description="Duration per segment in seconds")
-    max_segments: int = Field(50, description="Maximum segments to keep (oldest evicted)")
+    segment_duration_s: float = Field(10.0, description="Duration per segment in seconds (0 disables disk segment writes)")
+    max_segments: int = Field(50, description="Maximum segments to keep (0 disables disk segment writes)")
     antenna: str = Field("", description="Antenna port name")
+    rolling_window_s: float = Field(30.0, description="Rolling IQ buffer length in seconds (capped to ~512 MB)")
 
 
 class RetuneRequest(BaseModel):
@@ -237,12 +238,18 @@ async def start_monitor(req: MonitorStartRequest):
         max_segments=req.max_segments,
         output_base_dir=base_dir,
         register_metadata_callback=_register_segment_callback,
+        rolling_window_s=req.rolling_window_s,
     )
 
     monitors[session_id] = runner
     runner.start()
 
-    return {"session_id": session_id, "status": "running"}
+    return {
+        "session_id": session_id,
+        "status": "running",
+        "rolling_window_s": runner.rolling_window_s,
+        "segments_enabled": req.segment_duration_s > 0 and req.max_segments > 0,
+    }
 
 
 @router.post("/monitor/stop")
@@ -299,6 +306,125 @@ async def get_monitor_status():
         "segments": [{"index": s.index, "filepath": s.filepath, "center_freq": s.center_freq, "timestamp": s.timestamp, "num_samples": s.num_samples} for s in segments[-10:]],  # last 10
         "error": runner.error,
     }
+
+
+class SnapshotRequest(BaseModel):
+    duration_s: float = Field(10.0, description="Window length in seconds (taken from the rolling buffer)")
+    offset_s: float = Field(0.0, description="How many seconds ago the window ends (0 = up to 'now')")
+
+
+@router.post("/monitor/snapshot", status_code=201)
+async def snapshot_monitor(req: SnapshotRequest):
+    """Slice the rolling IQ buffer of the running monitor and write it out as a full SigMF recording.
+
+    Auto-registers the recording in the metadata DB so it immediately appears in the browser
+    and via /api/agent/recordings.
+    """
+    monitors = get_active_monitors()
+    running = [(mid, m) for mid, m in monitors.items() if m.status == "running"]
+    if not running:
+        raise HTTPException(status_code=404, detail="No active monitor session")
+
+    _, runner = running[0]
+    samples, cfg_snap = runner.snapshot(req.duration_s, req.offset_s)
+    if samples.size == 0:
+        raise HTTPException(status_code=400, detail="No samples available in the requested window")
+
+    base_dir = os.getenv("IQENGINE_BACKEND_LOCAL_FILEPATH", os.path.join(os.getcwd(), "iqengine"))
+    output_dir = os.path.join(base_dir, "sdr_captures")
+    basename = write_sigmf_recording(samples, cfg_snap, output_dir, "snapshot")
+    filepath = os.path.join("sdr_captures", basename)
+
+    try:
+        await _register_capture_metadata(filepath, cfg_snap)
+    except Exception as e:
+        logger.warning(f"Failed to register snapshot metadata: {e}")
+
+    return {
+        "filepath": filepath,
+        "account": "local",
+        "container": "local",
+        "num_samples": int(samples.size),
+        "duration_s": float(samples.size / cfg_snap.sample_rate),
+        "center_freq_hz": cfg_snap.center_freq,
+        "sample_rate_hz": cfg_snap.sample_rate,
+    }
+
+
+@router.websocket("/monitor/spectrum")
+async def live_spectrum(
+    ws: WebSocket,
+    fft_size: int = 4096,
+    frame_rate: float = 10.0,
+    window: str = "hanning",
+):
+    """Stream live FFT frames as binary float32 dB arrays from the rolling buffer.
+
+    Query params:
+      fft_size:  FFT length per frame (128-32768, default 4096). One FFT = fft_size samples.
+      frame_rate: Frames per second (1-30, default 10). Bandwidth ~= frame_rate * fft_size * 4 bytes.
+      window: Window function (hanning, hamming, blackman, rectangle).
+
+    Protocol:
+      On connect: JSON header {type: "config", fft_size, frame_rate, center_freq_hz, sample_rate_hz, bin_hz}
+      Per frame:  JSON metadata {type: "frame", timestamp, center_freq_hz, sample_rate_hz, ...}
+                  then binary float32[fft_size] in dB (fft-shifted so bin 0 = lowest frequency).
+    """
+    await ws.accept()
+
+    # Clamp params — protects server and matches gqrx-ish sane ranges
+    frame_rate = max(1.0, min(float(frame_rate), 30.0))
+    fft_size = max(128, min(int(fft_size), 32768))
+
+    monitors = get_active_monitors()
+    running = [(mid, m) for mid, m in monitors.items() if m.status == "running"]
+    if not running:
+        await ws.send_json({"type": "error", "error": "No active monitor session"})
+        await ws.close()
+        return
+
+    session_id, runner = running[0]
+    loop = asyncio.get_event_loop()
+    q: asyncio.Queue = asyncio.Queue(maxsize=64)
+    subscriber = SpectrumSubscriber(
+        queue=q,
+        loop=loop,
+        fft_size=fft_size,
+        frame_rate=frame_rate,
+        window=window,
+    )
+    runner.add_spectrum_subscriber(subscriber)
+
+    try:
+        await ws.send_json({
+            "type": "config",
+            "session_id": session_id,
+            "fft_size": fft_size,
+            "frame_rate": frame_rate,
+            "window": window,
+            "center_freq_hz": runner.config.center_freq,
+            "sample_rate_hz": runner.config.sample_rate,
+            "bin_hz": runner.config.sample_rate / fft_size,
+            "dtype": "float32",
+            "fft_shifted": True,
+            "rolling_window_s": runner.rolling_window_s,
+        })
+
+        while True:
+            data = await q.get()
+            if data is None:
+                await ws.send_json({"type": "stopped"})
+                break
+            binary = data.pop("_binary")
+            await ws.send_json(data)
+            await ws.send_bytes(binary)
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"Live spectrum WS error: {e}")
+    finally:
+        runner.remove_spectrum_subscriber(subscriber)
 
 
 @router.websocket("/monitor/live")

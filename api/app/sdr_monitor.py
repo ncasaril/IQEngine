@@ -10,13 +10,81 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from helpers.spectrogram_engine import apply_colormap, compute_spectrogram_db, rgb_to_png
 
 from .sdr_device import SDRConfig, SDRDeviceBase, get_device, get_device_lock, write_sigmf_recording
+
+
+# Complex64 samples are 8 bytes each (float32 I + float32 Q).
+_BYTES_PER_SAMPLE = 8
+
+
+class RollingBuffer:
+    """Thread-safe circular buffer for raw complex64 IQ samples.
+
+    Stores the most recent `capacity` samples. Uses an absolute monotonic
+    sample index (`total_written`) so subscribers / snapshots can address
+    samples across wraparound.
+    """
+
+    def __init__(self, sample_rate: float, window_s: float, max_bytes: int = 512 * 1024 * 1024):
+        max_samples = max_bytes // _BYTES_PER_SAMPLE
+        desired = int(sample_rate * window_s)
+        self.capacity = max(1, min(desired, max_samples))
+        self.effective_window_s = self.capacity / sample_rate if sample_rate > 0 else 0.0
+        self.sample_rate = sample_rate
+        self._data = np.zeros(self.capacity, dtype=np.complex64)
+        self.total_written = 0
+        self._lock = threading.Lock()
+
+    def write(self, samples: np.ndarray) -> None:
+        if samples.size == 0:
+            return
+        with self._lock:
+            n = samples.size
+            if n >= self.capacity:
+                self._data[:] = samples[-self.capacity:]
+                self.total_written += n
+                return
+            head = self.total_written % self.capacity
+            end = head + n
+            if end <= self.capacity:
+                self._data[head:end] = samples
+            else:
+                first = self.capacity - head
+                self._data[head:] = samples[:first]
+                self._data[: end - self.capacity] = samples[first:]
+            self.total_written += n
+
+    def _slice_locked(self, start_abs: int, end_abs: int) -> np.ndarray:
+        oldest_valid = max(0, self.total_written - self.capacity)
+        start_abs = max(start_abs, oldest_valid)
+        end_abs = min(end_abs, self.total_written)
+        n = end_abs - start_abs
+        if n <= 0:
+            return np.array([], dtype=np.complex64)
+        start_idx = start_abs % self.capacity
+        end_idx = end_abs % self.capacity
+        if end_idx == 0 and n > 0:
+            end_idx = self.capacity
+        if start_idx < end_idx:
+            return self._data[start_idx:end_idx].copy()
+        return np.concatenate([self._data[start_idx:], self._data[:end_idx]])
+
+    def read_latest(self, n: int) -> np.ndarray:
+        with self._lock:
+            if self.total_written == 0 or n <= 0:
+                return np.array([], dtype=np.complex64)
+            n = min(n, self.capacity)
+            return self._slice_locked(self.total_written - n, self.total_written)
+
+    def read_range(self, start_abs: int, n: int) -> np.ndarray:
+        with self._lock:
+            return self._slice_locked(start_abs, start_abs + n)
 
 logger = logging.getLogger("api")
 
@@ -56,6 +124,18 @@ class WaterfallSubscriber:
     mag_max: Optional[float] = None
 
 
+@dataclass
+class SpectrumSubscriber:
+    """A WebSocket subscriber that receives live FFT frames as binary float32 dB arrays."""
+    queue: asyncio.Queue
+    loop: asyncio.AbstractEventLoop
+    fft_size: int = 4096
+    frame_rate: float = 10.0
+    window: str = "hanning"
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    thread: Optional[threading.Thread] = None
+
+
 class MonitorRunner:
     """Runs continuous SDR capture in a dedicated thread."""
 
@@ -67,6 +147,8 @@ class MonitorRunner:
         max_segments: int,
         output_base_dir: str,
         register_metadata_callback=None,
+        rolling_window_s: float = 30.0,
+        chunk_duration_s: float = 0.05,
     ):
         self.session_id = session_id
         self.config = config
@@ -74,6 +156,8 @@ class MonitorRunner:
         self.max_segments = max_segments
         self.output_dir = os.path.join(output_base_dir, "sdr_captures", f"monitor_{session_id}")
         self.register_metadata_callback = register_metadata_callback
+        self.rolling_window_s = rolling_window_s
+        self.chunk_duration_s = chunk_duration_s
 
         self._stop_event = threading.Event()
         self._retune_queue: queue.Queue = queue.Queue()
@@ -84,6 +168,9 @@ class MonitorRunner:
         self._error: Optional[str] = None
         self._waterfall_subscribers: List[WaterfallSubscriber] = []
         self._waterfall_lock = threading.Lock()
+        self._spectrum_subscribers: List[SpectrumSubscriber] = []
+        self._spectrum_lock = threading.Lock()
+        self._rolling_buffer: Optional[RollingBuffer] = None
 
     @property
     def status(self) -> str:
@@ -131,6 +218,91 @@ class MonitorRunner:
             if subscriber in self._waterfall_subscribers:
                 self._waterfall_subscribers.remove(subscriber)
 
+    def add_spectrum_subscriber(self, subscriber: SpectrumSubscriber):
+        """Register a spectrum subscriber and spawn its producer thread."""
+        with self._spectrum_lock:
+            self._spectrum_subscribers.append(subscriber)
+        subscriber.thread = threading.Thread(
+            target=self._spectrum_producer,
+            args=(subscriber,),
+            name=f"spectrum-{id(subscriber)}",
+            daemon=True,
+        )
+        subscriber.thread.start()
+
+    def remove_spectrum_subscriber(self, subscriber: SpectrumSubscriber):
+        subscriber.stop_event.set()
+        with self._spectrum_lock:
+            if subscriber in self._spectrum_subscribers:
+                self._spectrum_subscribers.remove(subscriber)
+        if subscriber.thread and subscriber.thread.is_alive():
+            subscriber.thread.join(timeout=2)
+
+    def _spectrum_producer(self, sub: SpectrumSubscriber):
+        """Per-subscriber producer thread — reads latest fft_size samples from the rolling buffer
+        at the configured frame rate, computes one FFT row in dB, and pushes a binary frame."""
+        period = 1.0 / max(sub.frame_rate, 0.1)
+        next_tick = time.monotonic()
+        while not sub.stop_event.is_set() and not self._stop_event.is_set():
+            now = time.monotonic()
+            wait = next_tick - now
+            if wait > 0:
+                time.sleep(min(wait, 0.1))
+                continue
+            next_tick = now + period
+
+            buf = self._rolling_buffer
+            if buf is None or buf.total_written < sub.fft_size:
+                continue
+            try:
+                samples = buf.read_latest(sub.fft_size)
+                if samples.size < sub.fft_size:
+                    continue
+                db = compute_spectrogram_db(samples, sub.fft_size, sub.window)
+                if db.shape[0] == 0:
+                    continue
+                row = np.ascontiguousarray(db[0], dtype=np.float32)
+                payload = {
+                    "type": "frame",
+                    "fft_size": sub.fft_size,
+                    "center_freq_hz": self.config.center_freq,
+                    "sample_rate_hz": self.config.sample_rate,
+                    "timestamp": time.time(),
+                    "total_samples": buf.total_written,
+                    "_binary": row.tobytes(),
+                }
+                try:
+                    sub.loop.call_soon_threadsafe(sub.queue.put_nowait, payload)
+                except Exception:
+                    # Loop/queue closed — subscriber is gone
+                    break
+            except Exception as e:
+                logger.warning(f"Spectrum producer error: {e}")
+
+    def snapshot(self, duration_s: float, offset_s: float = 0.0) -> Tuple[np.ndarray, SDRConfig]:
+        """Return (samples, config_snapshot) for a window of the rolling buffer.
+
+        The window ends at `now - offset_s` and has length `duration_s`.
+        Samples are clipped to what's actually available in the buffer.
+        """
+        buf = self._rolling_buffer
+        cfg_snap = SDRConfig(
+            center_freq=self.config.center_freq,
+            sample_rate=self.config.sample_rate,
+            gain=self.config.gain,
+            antenna=getattr(self.config, "antenna", ""),
+            bandwidth=getattr(self.config, "bandwidth", 0.0),
+        )
+        if buf is None:
+            return np.array([], dtype=np.complex64), cfg_snap
+        sr = self.config.sample_rate
+        total = buf.total_written
+        end_abs = total - max(0, int(offset_s * sr))
+        n = max(0, int(duration_s * sr))
+        start_abs = end_abs - n
+        samples = buf.read_range(start_abs, n)
+        return samples, cfg_snap
+
     def _notify_waterfall_subscribers(self, samples: np.ndarray, segment_index: int):
         """Compute spectrogram strips and push to all WebSocket subscribers."""
         with self._waterfall_lock:
@@ -170,8 +342,12 @@ class MonitorRunner:
             except Exception as e:
                 logger.warning(f"Failed to send waterfall strip to subscriber: {e}")
 
+    def _segments_enabled(self) -> bool:
+        return self.segment_duration_s > 0 and self.max_segments > 0
+
     def _run(self):
-        """Main monitor loop running in dedicated thread."""
+        """Main monitor loop — reads SDR in small chunks, feeds the rolling buffer,
+        and optionally accumulates chunks into SigMF segments on disk."""
         device = get_device()
         device_lock = get_device_lock()
 
@@ -185,9 +361,20 @@ class MonitorRunner:
                 device.open()
             device.configure(self.config)
 
+            self._rolling_buffer = RollingBuffer(
+                sample_rate=self.config.sample_rate,
+                window_s=self.rolling_window_s,
+            )
+
+            chunk_samples = max(1024, int(self.config.sample_rate * self.chunk_duration_s))
+            seg_target = int(self.config.sample_rate * self.segment_duration_s) if self._segments_enabled() else 0
+            seg_accum: List[np.ndarray] = []
+            seg_accum_n = 0
             segment_index = 0
+
             while not self._stop_event.is_set():
                 # Check for retune commands
+                retuned = False
                 try:
                     while True:
                         cmd = self._retune_queue.get_nowait()
@@ -197,52 +384,72 @@ class MonitorRunner:
                             self.config.gain = cmd["gain"]
                         if "sample_rate" in cmd:
                             self.config.sample_rate = cmd["sample_rate"]
+                            retuned = True
                         device.configure(self.config)
                 except queue.Empty:
                     pass
+                if retuned:
+                    # Sample rate changed — rebuild buffer + recompute chunk sizes, drop any partial segment
+                    self._rolling_buffer = RollingBuffer(
+                        sample_rate=self.config.sample_rate,
+                        window_s=self.rolling_window_s,
+                    )
+                    chunk_samples = max(1024, int(self.config.sample_rate * self.chunk_duration_s))
+                    seg_target = int(self.config.sample_rate * self.segment_duration_s) if self._segments_enabled() else 0
+                    seg_accum.clear()
+                    seg_accum_n = 0
 
-                # Capture one segment
-                num_samples = int(self.config.sample_rate * self.segment_duration_s)
+                # Read one chunk
                 try:
-                    samples = device.read_samples(num_samples)
+                    chunk = device.read_samples(chunk_samples)
                 except Exception as e:
                     logger.error(f"Monitor read error: {e}")
                     self._status = "error"
                     self._error = str(e)
                     break
 
-                # Write segment
-                prefix = f"{segment_index:06d}"
-                basename = write_sigmf_recording(samples, self.config, self.output_dir, prefix)
-                filepath = os.path.join("sdr_captures", f"monitor_{self.session_id}", basename)
+                # Feed rolling buffer (primary data path)
+                self._rolling_buffer.write(chunk)
 
-                segment = MonitorSegment(
-                    index=segment_index,
-                    filepath=filepath,
-                    center_freq=self.config.center_freq,
-                    sample_rate=self.config.sample_rate,
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    num_samples=len(samples),
-                )
+                # Accumulate into a segment only if segments are enabled
+                if seg_target > 0:
+                    seg_accum.append(chunk)
+                    seg_accum_n += len(chunk)
+                    if seg_accum_n >= seg_target:
+                        samples = np.concatenate(seg_accum)[:seg_target]
+                        seg_accum.clear()
+                        seg_accum_n = 0
 
-                with self._lock:
-                    self._segments.append(segment)
-                    # Evict oldest if over limit
-                    while len(self._segments) > self.max_segments:
-                        old = self._segments.pop(0)
-                        self._evict_segment(old)
+                        prefix = f"{segment_index:06d}"
+                        basename = write_sigmf_recording(samples, self.config, self.output_dir, prefix)
+                        filepath = os.path.join("sdr_captures", f"monitor_{self.session_id}", basename)
 
-                # Push spectrogram strip to live waterfall subscribers
-                self._notify_waterfall_subscribers(samples, segment_index)
+                        segment = MonitorSegment(
+                            index=segment_index,
+                            filepath=filepath,
+                            center_freq=self.config.center_freq,
+                            sample_rate=self.config.sample_rate,
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            num_samples=len(samples),
+                        )
 
-                # Register metadata in DB (if callback provided)
-                if self.register_metadata_callback:
-                    try:
-                        self.register_metadata_callback(filepath, self.config)
-                    except Exception as e:
-                        logger.warning(f"Failed to register segment metadata: {e}")
+                        with self._lock:
+                            self._segments.append(segment)
+                            while len(self._segments) > self.max_segments:
+                                old = self._segments.pop(0)
+                                self._evict_segment(old)
 
-                segment_index += 1
+                        # Push spectrogram strip to live waterfall subscribers
+                        self._notify_waterfall_subscribers(samples, segment_index)
+
+                        # Register metadata in DB (if callback provided)
+                        if self.register_metadata_callback:
+                            try:
+                                self.register_metadata_callback(filepath, self.config)
+                            except Exception as e:
+                                logger.warning(f"Failed to register segment metadata: {e}")
+
+                        segment_index += 1
 
         except Exception as e:
             logger.error(f"Monitor thread error: {e}")
@@ -263,6 +470,15 @@ class MonitorRunner:
                         sub.loop.call_soon_threadsafe(sub.queue.put_nowait, None)
                     except Exception:
                         pass
+            # Notify spectrum subscribers and let their threads exit
+            with self._spectrum_lock:
+                subs = list(self._spectrum_subscribers)
+            for sub in subs:
+                sub.stop_event.set()
+                try:
+                    sub.loop.call_soon_threadsafe(sub.queue.put_nowait, None)
+                except Exception:
+                    pass
 
     def _evict_segment(self, segment: MonitorSegment):
         """Remove old segment files from disk."""
