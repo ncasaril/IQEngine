@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { SpectrumPlot, SpectrumConfig } from './SpectrumPlot';
-import { LiveWaterfall } from './LiveWaterfall';
+import { SpectrumWaterfall } from './SpectrumWaterfall';
 
 interface MonitorForm {
   center_freq_mhz: number;
@@ -339,19 +339,18 @@ export function SDRLivePage() {
         />
       </div>
 
-      {/* Waterfall */}
+      {/* Waterfall — driven by the same /spectrum WS so it scrolls at frame_rate */}
       <div className="card bg-base-200 p-2 mb-3">
-        <LiveWaterfall
+        <SpectrumWaterfall
           active={running}
           fftSize={fftSize}
-          maxRows={128}
-          cmap="viridis"
+          frameRate={frameRate}
+          minDb={minDb}
+          maxDb={maxDb}
+          refOffsetDb={refOffsetDb}
+          paused={paused}
           height={360}
         />
-        <p className="text-[10px] opacity-50 mt-1">
-          Waterfall updates on segment boundaries — enable segment writing on the legacy /sdr page if you need
-          continuous waterfall strips. The spectrum trace above runs at {frameRate} Hz from the rolling buffer.
-        </p>
       </div>
 
       {/* Snapshot */}

@@ -1,4 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  PLOT_MARGIN_LEFT,
+  PLOT_MARGIN_RIGHT,
+  PLOT_MARGIN_TOP,
+  PLOT_MARGIN_BOTTOM,
+} from './plot-geometry';
 
 export interface SpectrumConfig {
   session_id: string;
@@ -34,10 +40,16 @@ interface Props {
 }
 
 const GRID_COLOR = 'rgba(255,255,255,0.08)';
-const AXIS_COLOR = 'rgba(255,255,255,0.45)';
+const AXIS_COLOR = 'rgba(255,255,255,0.55)';
 const LIVE_COLOR = '#4ade80';   // green-400
 const MAX_HOLD_COLOR = '#f97316'; // orange-500
 const PAUSE_COLOR = '#60a5fa';  // blue-400
+
+// Re-export margins under short names for local use
+const MARGIN_LEFT = PLOT_MARGIN_LEFT;
+const MARGIN_RIGHT = PLOT_MARGIN_RIGHT;
+const MARGIN_TOP = PLOT_MARGIN_TOP;
+const MARGIN_BOTTOM = PLOT_MARGIN_BOTTOM;
 
 export function SpectrumPlot({
   active,
@@ -186,7 +198,9 @@ export function SpectrumPlot({
     (pxX: number, canvasW: number) => {
       const cfg = configRef.current;
       if (!cfg) return 0;
-      const frac = Math.max(0, Math.min(1, pxX / canvasW));
+      const plotL = MARGIN_LEFT;
+      const plotW = Math.max(1, canvasW - MARGIN_LEFT - MARGIN_RIGHT);
+      const frac = Math.max(0, Math.min(1, (pxX - plotL) / plotW));
       return cfg.center_freq_hz + (frac - 0.5) * cfg.sample_rate_hz;
     },
     []
@@ -200,12 +214,18 @@ export function SpectrumPlot({
       const x = ev.clientX - rect.left;
       const y = ev.clientY - rect.top;
       setHoverPx({ x, y });
+      // Bail out of readouts outside the plot area
+      const plotL = MARGIN_LEFT;
+      const plotW = Math.max(1, rect.width - MARGIN_LEFT - MARGIN_RIGHT);
+      if (x < plotL || x > plotL + plotW) {
+        onCursorReadout?.(null);
+        return;
+      }
       const hz = frameToHz(x, rect.width);
-      // Report dB at the cursor's frequency bin using the latest frame
       const cfg = configRef.current;
       const frame = paused && pausedFrameRef.current ? pausedFrameRef.current : latestFrameRef.current;
       if (cfg && frame) {
-        const bin = Math.max(0, Math.min(cfg.fft_size - 1, Math.round((x / rect.width) * cfg.fft_size)));
+        const bin = Math.max(0, Math.min(cfg.fft_size - 1, Math.round(((x - plotL) / plotW) * cfg.fft_size)));
         onCursorReadout?.({ hz, db: frame[bin] + refOffsetDb });
       }
     },
@@ -279,68 +299,80 @@ function drawSpectrum(
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.width;
   const h = canvas.height;
+
+  const mL = MARGIN_LEFT * dpr;
+  const mR = MARGIN_RIGHT * dpr;
+  const mT = MARGIN_TOP * dpr;
+  const mB = MARGIN_BOTTOM * dpr;
+  const plotL = mL;
+  const plotR = w - mR;
+  const plotT = mT;
+  const plotB = h - mB;
+  const plotW = Math.max(1, plotR - plotL);
+  const plotH = Math.max(1, plotB - plotT);
+
   ctx.fillStyle = 'black';
   ctx.fillRect(0, 0, w, h);
 
   const { config, live, maxHold, minDb, maxDb, refOffsetDb, paused } = opts;
-
-  // dB -> Y (inverted: higher dB = top)
   const span = Math.max(1, maxDb - minDb);
   const dbToY = (db: number) => {
     const t = (db - minDb) / span;
-    return Math.round((1 - Math.max(0, Math.min(1, t))) * h);
+    return plotT + Math.round((1 - Math.max(0, Math.min(1, t))) * plotH);
   };
 
   // Grid
   ctx.strokeStyle = GRID_COLOR;
   ctx.lineWidth = 1 * dpr;
   ctx.beginPath();
-  // Horizontal grid every 10 dB
   const step = 10;
   const firstDb = Math.ceil(minDb / step) * step;
   for (let db = firstDb; db <= maxDb; db += step) {
     const y = dbToY(db);
-    ctx.moveTo(0, y);
-    ctx.lineTo(w, y);
+    ctx.moveTo(plotL, y);
+    ctx.lineTo(plotR, y);
   }
-  // Vertical grid: 10 divisions
   for (let i = 1; i < 10; i++) {
-    const x = Math.round((i / 10) * w);
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h);
+    const x = plotL + Math.round((i / 10) * plotW);
+    ctx.moveTo(x, plotT);
+    ctx.lineTo(x, plotB);
   }
   ctx.stroke();
 
   // Axis text
   ctx.font = `${10 * dpr}px ui-monospace, monospace`;
   ctx.fillStyle = AXIS_COLOR;
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
+  // dB labels — right-aligned in the left margin
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
   for (let db = firstDb; db <= maxDb; db += step) {
     const y = dbToY(db);
-    ctx.fillText(`${db} dB`, 4 * dpr, Math.min(y + 2 * dpr, h - 12 * dpr));
+    ctx.fillText(`${db}`, plotL - 4 * dpr, y);
   }
   if (config) {
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
+    ctx.textBaseline = 'top';
     for (let i = 0; i <= 10; i++) {
       const frac = i / 10;
-      const x = Math.round(frac * w);
+      const x = plotL + Math.round(frac * plotW);
       const hz = config.center_freq_hz + (frac - 0.5) * config.sample_rate_hz;
-      const label = `${(hz / 1e6).toFixed(3)}`;
-      ctx.fillText(label, x, h - 2 * dpr);
+      ctx.fillText(`${(hz / 1e6).toFixed(3)}`, x, plotB + 2 * dpr);
     }
   }
 
-  // Trace helper
+  // Clip traces to the plot area
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plotL, plotT, plotW, plotH);
+  ctx.clip();
+
   const drawTrace = (data: Float32Array, color: string, lineWidth: number) => {
     if (!data || data.length === 0) return;
     const n = data.length;
     ctx.strokeStyle = color;
     ctx.lineWidth = lineWidth * dpr;
     ctx.beginPath();
-    // Downsample to canvas width by taking max dB in each column bucket (classic peak-hold pixel)
-    const cols = Math.floor(w);
+    const cols = Math.floor(plotW);
     const binsPerCol = n / cols;
     for (let col = 0; col < cols; col++) {
       const start = Math.floor(col * binsPerCol);
@@ -351,12 +383,15 @@ function drawSpectrum(
       }
       if (!isFinite(peak)) continue;
       const y = dbToY(peak + refOffsetDb);
-      if (col === 0) ctx.moveTo(col, y);
-      else ctx.lineTo(col, y);
+      const x = plotL + col;
+      if (col === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     }
     ctx.stroke();
   };
 
   if (maxHold) drawTrace(maxHold, MAX_HOLD_COLOR, 1);
   if (live) drawTrace(live, paused ? PAUSE_COLOR : LIVE_COLOR, 1.5);
+
+  ctx.restore();
 }
