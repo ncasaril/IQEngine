@@ -28,6 +28,8 @@ interface Props {
   maxDb?: number;
   maxHold?: boolean;
   paused?: boolean;
+  /** Notch the DC bins to hide the LO leakage spike. Applied server-side. */
+  dcRemove?: boolean;
   height?: number;
   onConfig?: (cfg: SpectrumConfig) => void;
   onStatus?: (status: string) => void;
@@ -60,6 +62,7 @@ export function SpectrumPlot({
   maxDb = 0,
   maxHold = false,
   paused = false,
+  dcRemove = false,
   height = 240,
   onConfig,
   onStatus,
@@ -103,7 +106,7 @@ export function SpectrumPlot({
     }
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${window.location.host}/api/sdr/monitor/spectrum?fft_size=${fftSize}&frame_rate=${frameRate}`;
+    const url = `${proto}//${window.location.host}/api/sdr/monitor/spectrum?fft_size=${fftSize}&frame_rate=${frameRate}&dc_remove=${dcRemove ? 1 : 0}`;
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
@@ -156,7 +159,7 @@ export function SpectrumPlot({
       ws.close();
       wsRef.current = null;
     };
-  }, [active, fftSize, frameRate, onConfig, onStatus]);
+  }, [active, fftSize, frameRate, dcRemove, onConfig, onStatus]);
 
   // Draw loop — RAF-paced so React doesn't re-render per frame
   useEffect(() => {

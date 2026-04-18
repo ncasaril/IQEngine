@@ -357,6 +357,8 @@ async def live_spectrum(
     fft_size: int = 4096,
     frame_rate: float = 10.0,
     window: str = "hanning",
+    dc_remove: bool = False,
+    dc_notch_bins: int = 2,
 ):
     """Stream live FFT frames as binary float32 dB arrays from the rolling buffer.
 
@@ -392,6 +394,8 @@ async def live_spectrum(
         fft_size=fft_size,
         frame_rate=frame_rate,
         window=window,
+        dc_remove=bool(dc_remove),
+        dc_notch_bins=max(0, min(int(dc_notch_bins), 16)),
     )
     runner.add_spectrum_subscriber(subscriber)
 
@@ -408,6 +412,8 @@ async def live_spectrum(
             "dtype": "float32",
             "fft_shifted": True,
             "rolling_window_s": runner.rolling_window_s,
+            "dc_remove": subscriber.dc_remove,
+            "dc_notch_bins": subscriber.dc_notch_bins,
         })
 
         while True:

@@ -12,6 +12,8 @@ interface Props {
   refOffsetDb?: number;
   height?: number;
   paused?: boolean;
+  /** Notch DC bins server-side to hide the LO leakage spike. */
+  dcRemove?: boolean;
 }
 
 /**
@@ -28,6 +30,7 @@ export function SpectrumWaterfall({
   refOffsetDb = 0,
   height = 360,
   paused = false,
+  dcRemove = false,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -78,7 +81,7 @@ export function SpectrumWaterfall({
       return;
     }
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${window.location.host}/api/sdr/monitor/spectrum?fft_size=${fftSize}&frame_rate=${frameRate}`;
+    const url = `${proto}//${window.location.host}/api/sdr/monitor/spectrum?fft_size=${fftSize}&frame_rate=${frameRate}&dc_remove=${dcRemove ? 1 : 0}`;
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
@@ -114,7 +117,7 @@ export function SpectrumWaterfall({
       ws.close();
       wsRef.current = null;
     };
-  }, [active, fftSize, frameRate]);
+  }, [active, fftSize, frameRate, dcRemove]);
 
   return (
     <div className="relative">

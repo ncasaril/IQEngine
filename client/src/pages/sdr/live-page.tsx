@@ -40,6 +40,8 @@ export function SDRLivePage() {
   const [maxHold, setMaxHold] = useState(false);
   const [maxHoldResetKey, setMaxHoldResetKey] = useState(0);
   const [paused, setPaused] = useState(false);
+  const [dcRemove, setDcRemove] = useState(false);
+  const [waterfallHeight, setWaterfallHeight] = useState(360);
 
   // Snapshot settings
   const [snapshotDuration, setSnapshotDuration] = useState(5);
@@ -300,6 +302,16 @@ export function SDRLivePage() {
             </div>
           </div>
           <div className="flex flex-col text-xs gap-1">
+            <span className="opacity-70">Filters</span>
+            <button
+              className={`btn btn-xs ${dcRemove ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => setDcRemove((v) => !v)}
+              title="Notch the DC bins to hide the HackRF LO leakage spike (display only — IQ is untouched)"
+            >
+              DC remove
+            </button>
+          </div>
+          <div className="flex flex-col text-xs gap-1">
             <span className="opacity-70">Transport</span>
             <button
               className={`btn btn-xs ${paused ? 'btn-warning' : 'btn-ghost'}`}
@@ -331,6 +343,7 @@ export function SDRLivePage() {
           maxDb={maxDb}
           maxHold={maxHold}
           paused={paused}
+          dcRemove={dcRemove}
           maxHoldResetKey={maxHoldResetKey}
           height={260}
           onConfig={setConfig}
@@ -341,6 +354,20 @@ export function SDRLivePage() {
 
       {/* Waterfall — driven by the same /spectrum WS so it scrolls at frame_rate */}
       <div className="card bg-base-200 p-2 mb-3">
+        <div className="flex items-center justify-end gap-2 mb-1 text-xs">
+          <span className="opacity-70">Height</span>
+          <input
+            type="range"
+            min={160}
+            max={1200}
+            step={40}
+            value={waterfallHeight}
+            onChange={(e) => setWaterfallHeight(parseInt(e.target.value))}
+            className="range range-xs w-40"
+            title={`${waterfallHeight}px`}
+          />
+          <span className="font-mono opacity-70 w-12 text-right">{waterfallHeight}px</span>
+        </div>
         <SpectrumWaterfall
           active={running}
           fftSize={fftSize}
@@ -349,7 +376,8 @@ export function SDRLivePage() {
           maxDb={maxDb}
           refOffsetDb={refOffsetDb}
           paused={paused}
-          height={360}
+          dcRemove={dcRemove}
+          height={waterfallHeight}
         />
       </div>
 

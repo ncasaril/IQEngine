@@ -132,6 +132,8 @@ class SpectrumSubscriber:
     fft_size: int = 4096
     frame_rate: float = 10.0
     window: str = "hanning"
+    dc_remove: bool = False
+    dc_notch_bins: int = 2  # notch ±N bins around DC (center of fft-shifted output)
     stop_event: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
 
@@ -262,6 +264,17 @@ class MonitorRunner:
                 if db.shape[0] == 0:
                     continue
                 row = np.ascontiguousarray(db[0], dtype=np.float32)
+                if sub.dc_remove and row.size > 2 * sub.dc_notch_bins + 2:
+                    # Linearly interpolate across ±N bins around DC (center of fft-shifted output).
+                    # Display-only: the rolling buffer / snapshots keep the raw IQ.
+                    mid = row.size // 2
+                    l = mid - sub.dc_notch_bins
+                    r = mid + sub.dc_notch_bins
+                    left_val = row[l - 1]
+                    right_val = row[r + 1]
+                    # We want `r - l + 1` values filling row[l:r+1], interpolated between
+                    # the neighbors at l-1 and r+1 (exclusive of the endpoints).
+                    row[l:r + 1] = np.linspace(left_val, right_val, r - l + 3)[1:-1]
                 payload = {
                     "type": "frame",
                     "fft_size": sub.fft_size,
