@@ -39,6 +39,10 @@ interface Props {
   onCursorReadout?: (info: { hz: number; db: number } | null) => void;
   /** Bumping this value resets the max-hold trace. */
   maxHoldResetKey?: number;
+  /** Draw a semi-transparent channel overlay at this absolute frequency. */
+  channelCenterHz?: number | null;
+  /** Channel bandwidth to shade. */
+  channelBandwidthHz?: number;
 }
 
 const GRID_COLOR = 'rgba(255,255,255,0.08)';
@@ -69,6 +73,8 @@ export function SpectrumPlot({
   onClickFrequency,
   onCursorReadout,
   maxHoldResetKey = 0,
+  channelCenterHz = null,
+  channelBandwidthHz = 15_000,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -174,12 +180,14 @@ export function SpectrumPlot({
         maxDb,
         refOffsetDb,
         paused,
+        channelCenterHz,
+        channelBandwidthHz,
       });
       raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [minDb, maxDb, refOffsetDb, maxHold, paused]);
+  }, [minDb, maxDb, refOffsetDb, maxHold, paused, channelCenterHz, channelBandwidthHz]);
 
   // Resize the canvas buffer to match its CSS pixel size
   useEffect(() => {
@@ -295,6 +303,8 @@ function drawSpectrum(
     maxDb: number;
     refOffsetDb: number;
     paused: boolean;
+    channelCenterHz?: number | null;
+    channelBandwidthHz?: number;
   }
 ) {
   const ctx = canvas.getContext('2d');
@@ -361,6 +371,24 @@ function drawSpectrum(
       const hz = config.center_freq_hz + (frac - 0.5) * config.sample_rate_hz;
       ctx.fillText(`${(hz / 1e6).toFixed(3)}`, x, plotB + 2 * dpr);
     }
+  }
+
+  // Channel overlay (drawn before traces, behind them)
+  if (config && opts.channelCenterHz != null && opts.channelBandwidthHz) {
+    const bw = opts.channelBandwidthHz;
+    const fracL = (opts.channelCenterHz - bw / 2 - (config.center_freq_hz - config.sample_rate_hz / 2)) / config.sample_rate_hz;
+    const fracR = (opts.channelCenterHz + bw / 2 - (config.center_freq_hz - config.sample_rate_hz / 2)) / config.sample_rate_hz;
+    const xL = plotL + Math.max(0, Math.min(plotW, fracL * plotW));
+    const xR = plotL + Math.max(0, Math.min(plotW, fracR * plotW));
+    const xC = plotL + Math.max(0, Math.min(plotW, ((opts.channelCenterHz - (config.center_freq_hz - config.sample_rate_hz / 2)) / config.sample_rate_hz) * plotW));
+    ctx.fillStyle = 'rgba(250, 204, 21, 0.12)'; // amber-300 12%
+    ctx.fillRect(xL, plotT, Math.max(1, xR - xL), plotH);
+    ctx.strokeStyle = 'rgba(250, 204, 21, 0.6)';
+    ctx.lineWidth = 1 * dpr;
+    ctx.beginPath();
+    ctx.moveTo(xC, plotT);
+    ctx.lineTo(xC, plotB);
+    ctx.stroke();
   }
 
   // Clip traces to the plot area

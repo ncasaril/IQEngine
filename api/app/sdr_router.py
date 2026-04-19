@@ -11,8 +11,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
+from .sdr_audio import AUDIO_RATE, DemodConfig, SUPPORTED_MODES, MODE_NFM
 from .sdr_device import CaptureJob, SDRConfig, get_capture_jobs, get_device, get_device_lock, write_sigmf_recording
-from .sdr_monitor import MonitorRunner, SpectrumSubscriber, WaterfallSubscriber, get_active_monitors
+from .sdr_monitor import AudioSubscriber, MonitorRunner, SpectrumSubscriber, WaterfallSubscriber, get_active_monitors
 
 logger = logging.getLogger("api")
 
@@ -431,6 +432,110 @@ async def live_spectrum(
         logger.warning(f"Live spectrum WS error: {e}")
     finally:
         runner.remove_spectrum_subscriber(subscriber)
+
+
+@router.websocket("/monitor/audio")
+async def live_audio(
+    ws: WebSocket,
+    mode: str = "nfm",
+    center_hz: float = 0.0,
+    bandwidth_hz: float = 15_000.0,
+    volume_db: float = 0.0,
+    squelch_db: float = -120.0,
+):
+    """Stream demodulated audio (48 kHz mono int16 PCM) from the running monitor.
+
+    Connect with the initial demod config as query params, then send JSON text
+    frames `{ "type": "set", ...fields }` to retune / change bandwidth / volume
+    without reconnecting. Supported modes: nfm, wfm, am, usb, lsb.
+    """
+    await ws.accept()
+
+    mode = mode.lower()
+    if mode not in SUPPORTED_MODES:
+        await ws.send_json({"type": "error", "error": f"unsupported mode: {mode}"})
+        await ws.close()
+        return
+
+    monitors = get_active_monitors()
+    running = [(mid, m) for mid, m in monitors.items() if m.status == "running"]
+    if not running:
+        await ws.send_json({"type": "error", "error": "No active monitor session"})
+        await ws.close()
+        return
+
+    session_id, runner = running[0]
+    loop = asyncio.get_event_loop()
+    q: asyncio.Queue = asyncio.Queue(maxsize=128)
+
+    cfg = DemodConfig(
+        mode=mode,
+        center_hz=float(center_hz) if center_hz > 0 else float(runner.config.center_freq),
+        bandwidth_hz=max(100.0, float(bandwidth_hz)),
+        volume_db=float(volume_db),
+        squelch_db=float(squelch_db),
+    )
+    subscriber = AudioSubscriber(queue=q, loop=loop, config=cfg)
+    runner.add_audio_subscriber(subscriber)
+
+    # Background task that drains inbound control messages from the client
+    async def receive_loop():
+        try:
+            while True:
+                msg = await ws.receive_json()
+                if not isinstance(msg, dict):
+                    continue
+                t = msg.get("type")
+                if t == "set":
+                    new_cfg = DemodConfig(
+                        mode=str(msg.get("mode", subscriber.config.mode)).lower(),
+                        center_hz=float(msg.get("center_hz", subscriber.config.center_hz)),
+                        bandwidth_hz=max(100.0, float(msg.get("bandwidth_hz", subscriber.config.bandwidth_hz))),
+                        volume_db=float(msg.get("volume_db", subscriber.config.volume_db)),
+                        squelch_db=float(msg.get("squelch_db", subscriber.config.squelch_db)),
+                        muted=bool(msg.get("muted", subscriber.config.muted)),
+                    )
+                    if new_cfg.mode not in SUPPORTED_MODES:
+                        await ws.send_json({"type": "error", "error": f"unsupported mode: {new_cfg.mode}"})
+                        continue
+                    runner.update_audio_config(subscriber, new_cfg)
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            logger.warning(f"Audio WS receive loop error: {e}")
+
+    recv_task = asyncio.create_task(receive_loop())
+
+    try:
+        await ws.send_json({
+            "type": "config",
+            "session_id": session_id,
+            "sample_rate": AUDIO_RATE,
+            "format": "pcm_s16le",
+            "channels": 1,
+            "mode": cfg.mode,
+            "center_hz": cfg.center_hz,
+            "bandwidth_hz": cfg.bandwidth_hz,
+            "monitor_center_hz": runner.config.center_freq,
+            "monitor_sample_rate_hz": runner.config.sample_rate,
+        })
+
+        while True:
+            data = await q.get()
+            if data is None:
+                await ws.send_json({"type": "stopped"})
+                break
+            binary = data.pop("_binary")
+            await ws.send_json(data)
+            await ws.send_bytes(binary)
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"Live audio WS error: {e}")
+    finally:
+        recv_task.cancel()
+        runner.remove_audio_subscriber(subscriber)
 
 
 @router.websocket("/monitor/live")

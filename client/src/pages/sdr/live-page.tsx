@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { SpectrumPlot, SpectrumConfig } from './SpectrumPlot';
 import { SpectrumWaterfall } from './SpectrumWaterfall';
+import { DemodPlayer, DemodState } from './DemodPlayer';
 
 interface MonitorForm {
   center_freq_mhz: number;
@@ -42,6 +43,19 @@ export function SDRLivePage() {
   const [paused, setPaused] = useState(false);
   const [dcRemove, setDcRemove] = useState(false);
   const [waterfallHeight, setWaterfallHeight] = useState(360);
+
+  // Demodulation state — tuned independently from the monitor center frequency
+  const [demod, setDemod] = useState<DemodState>({
+    mode: 'nfm',
+    centerHz: form.center_freq_mhz * 1e6,
+    bandwidthHz: 15_000,
+    volumeDb: 0,
+    muted: false,
+    enabled: false,
+  });
+  const updateDemod = useCallback((patch: Partial<DemodState>) => {
+    setDemod((prev) => ({ ...prev, ...patch }));
+  }, []);
 
   // Snapshot settings
   const [snapshotDuration, setSnapshotDuration] = useState(5);
@@ -332,6 +346,15 @@ export function SDRLivePage() {
         </div>
       </div>
 
+      {/* Demod controls */}
+      <DemodPlayer
+        active={running}
+        demod={demod}
+        onChange={updateDemod}
+        monitorCenterHz={config?.center_freq_hz}
+        monitorSampleRateHz={config?.sample_rate_hz}
+      />
+
       {/* Spectrum */}
       <div className="card bg-base-200 p-2 mb-3">
         <SpectrumPlot
@@ -349,6 +372,9 @@ export function SDRLivePage() {
           onConfig={setConfig}
           onStatus={setStatus}
           onCursorReadout={setCursor}
+          onClickFrequency={(hz) => updateDemod({ centerHz: hz })}
+          channelCenterHz={demod.enabled ? demod.centerHz : null}
+          channelBandwidthHz={demod.bandwidthHz}
         />
       </div>
 

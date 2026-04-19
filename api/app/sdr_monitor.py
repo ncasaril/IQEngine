@@ -16,6 +16,7 @@ import numpy as np
 
 from helpers.spectrogram_engine import apply_colormap, compute_spectrogram_db, rgb_to_png
 
+from .sdr_audio import AUDIO_RATE, DemodChain, DemodConfig
 from .sdr_device import SDRConfig, SDRDeviceBase, get_device, get_device_lock, write_sigmf_recording
 
 
@@ -125,6 +126,18 @@ class WaterfallSubscriber:
 
 
 @dataclass
+class AudioSubscriber:
+    """A WebSocket subscriber that receives demodulated int16 PCM audio at AUDIO_RATE."""
+    queue: asyncio.Queue
+    loop: asyncio.AbstractEventLoop
+    config: DemodConfig
+    chain: Optional[DemodChain] = None
+    last_read_abs: int = 0
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    thread: Optional[threading.Thread] = None
+
+
+@dataclass
 class SpectrumSubscriber:
     """A WebSocket subscriber that receives live FFT frames as binary float32 dB arrays."""
     queue: asyncio.Queue
@@ -172,6 +185,8 @@ class MonitorRunner:
         self._waterfall_lock = threading.Lock()
         self._spectrum_subscribers: List[SpectrumSubscriber] = []
         self._spectrum_lock = threading.Lock()
+        self._audio_subscribers: List[AudioSubscriber] = []
+        self._audio_lock = threading.Lock()
         self._rolling_buffer: Optional[RollingBuffer] = None
 
     @property
@@ -291,6 +306,96 @@ class MonitorRunner:
                     break
             except Exception as e:
                 logger.warning(f"Spectrum producer error: {e}")
+
+    def add_audio_subscriber(self, subscriber: AudioSubscriber) -> None:
+        """Register an audio subscriber and spawn its DSP thread."""
+        buf = self._rolling_buffer
+        subscriber.last_read_abs = buf.total_written if buf is not None else 0
+        subscriber.chain = DemodChain(
+            src_rate=self.config.sample_rate,
+            monitor_center_hz=self.config.center_freq,
+            config=subscriber.config,
+        )
+        with self._audio_lock:
+            self._audio_subscribers.append(subscriber)
+        subscriber.thread = threading.Thread(
+            target=self._audio_producer,
+            args=(subscriber,),
+            name=f"audio-{id(subscriber)}",
+            daemon=True,
+        )
+        subscriber.thread.start()
+
+    def remove_audio_subscriber(self, subscriber: AudioSubscriber) -> None:
+        subscriber.stop_event.set()
+        with self._audio_lock:
+            if subscriber in self._audio_subscribers:
+                self._audio_subscribers.remove(subscriber)
+        if subscriber.thread and subscriber.thread.is_alive():
+            subscriber.thread.join(timeout=2)
+
+    def update_audio_config(self, subscriber: AudioSubscriber, cfg: DemodConfig) -> None:
+        """Update demod params on a running subscriber without dropping the stream."""
+        subscriber.config = cfg
+        if subscriber.chain is not None:
+            subscriber.chain.update_config(cfg)
+
+    def _audio_producer(self, sub: AudioSubscriber) -> None:
+        """Per-subscriber DSP thread. Reads contiguous blocks from the rolling buffer,
+        runs the demod chain, pushes int16 PCM to the subscriber's asyncio queue."""
+        # Chunk size in source samples — 20 ms at current monitor sample rate
+        chunk_dur_s = 0.02
+        underrun_logged_at = 0.0
+        while not sub.stop_event.is_set() and not self._stop_event.is_set():
+            buf = self._rolling_buffer
+            if buf is None or sub.chain is None:
+                time.sleep(0.01)
+                continue
+
+            # Source rate may have changed mid-stream (retune) — update chain if so
+            if sub.chain.src_rate != self.config.sample_rate or sub.chain.monitor_center_hz != self.config.center_freq:
+                sub.chain.update_monitor(self.config.sample_rate, self.config.center_freq)
+
+            chunk_samples = max(64, int(self.config.sample_rate * chunk_dur_s))
+            available = buf.total_written - sub.last_read_abs
+
+            if available < chunk_samples:
+                time.sleep(chunk_dur_s / 4)
+                continue
+
+            # If we've fallen behind the rolling buffer, skip forward to the newest available
+            oldest_valid = max(0, buf.total_written - buf.capacity)
+            if sub.last_read_abs < oldest_valid:
+                now = time.time()
+                if now - underrun_logged_at > 2.0:
+                    logger.warning(f"Audio subscriber fell behind rolling buffer by {oldest_valid - sub.last_read_abs} samples")
+                    underrun_logged_at = now
+                sub.last_read_abs = oldest_valid
+
+            iq = buf.read_range(sub.last_read_abs, chunk_samples)
+            sub.last_read_abs += iq.size
+            if iq.size == 0:
+                continue
+
+            try:
+                pcm = sub.chain.process(iq)
+            except Exception as e:
+                logger.warning(f"Audio producer DSP error: {e}")
+                continue
+
+            if pcm.size == 0:
+                continue
+
+            payload = {
+                "type": "audio",
+                "sample_rate": AUDIO_RATE,
+                "samples": int(pcm.size),
+                "_binary": pcm.tobytes(),
+            }
+            try:
+                sub.loop.call_soon_threadsafe(sub.queue.put_nowait, payload)
+            except Exception:
+                break
 
     def snapshot(self, duration_s: float, offset_s: float = 0.0) -> Tuple[np.ndarray, SDRConfig]:
         """Return (samples, config_snapshot) for a window of the rolling buffer.
@@ -487,6 +592,15 @@ class MonitorRunner:
             with self._spectrum_lock:
                 subs = list(self._spectrum_subscribers)
             for sub in subs:
+                sub.stop_event.set()
+                try:
+                    sub.loop.call_soon_threadsafe(sub.queue.put_nowait, None)
+                except Exception:
+                    pass
+            # Same for audio subscribers
+            with self._audio_lock:
+                asubs = list(self._audio_subscribers)
+            for sub in asubs:
                 sub.stop_event.set()
                 try:
                     sub.loop.call_soon_threadsafe(sub.queue.put_nowait, None)
