@@ -62,6 +62,7 @@ export function SpectrumWaterfall({
         canvas.height = Math.floor(height * dpr);
         const ctx = canvas.getContext('2d');
         if (ctx) {
+          ctx.imageSmoothingEnabled = false;
           ctx.fillStyle = 'black';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
         }
@@ -152,8 +153,13 @@ function drawRow(
   const plotR = Math.min(w, Math.max(plotL, w - Math.floor(PLOT_MARGIN_RIGHT * dpr)));
   const plotW = plotR - plotL;
 
-  // Scroll existing image down by 1 px, then draw the new row at the top.
-  ctx.drawImage(canvas, 0, 0, w, h, 0, 1, w, h - 1);
+  // Pixel-perfect scroll: copy the top (h-1) rows and paint them at y=1.
+  // drawImage with slight size mismatches resamples and accumulates blur,
+  // so we use getImageData/putImageData which never interpolates.
+  if (h > 1) {
+    const prev = ctx.getImageData(0, 0, w, h - 1);
+    ctx.putImageData(prev, 0, 1);
+  }
 
   // Build/refresh a row ImageData of full canvas width so we can paint the
   // whole top row in one putImageData, keeping the margins black.
