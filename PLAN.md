@@ -6,7 +6,7 @@ This document tracks the implementation plan for extending IQEngine with:
 3. Structured REST API for AI agent consumption (MCP-ready)
 4. MCP stdio server wrapping the agent API (`api/mcp_server/`)
 
-## Current Status: M1–M7 + M6 + MCP server complete, M8 and nice-to-haves remaining
+## Current Status: M1–M7 + M6 + MCP server + M9 (live demod) + M10 (perf/UX pass) complete
 
 Commits on `main`:
 - `617e2b0` — initial implementation of all three components (M1–M7)
@@ -14,6 +14,19 @@ Commits on `main`:
 - `7531686` — SDR capture auto-register + agent router ordering fix
 - `f68b77c` — M5 verification: monitor metadata callback, shutdown hook, SoapySDR 0.8.1 upgrade
 - `1e87c5c` — M6: live waterfall WebSocket streaming with scrolling canvas
+- `fc7a3ce`–`036ad6e` — M9.1–M9.3: gqrx-style `/sdr/live` page with spectrum + waterfall + live demod
+- `b15e416` — Unify live+recording views, stream chunked demod audio, add nfm/am/ssb plugins
+- `15d3634`–`03a743f` — Zoom Out Level wiring for server-side FFT, power-of-two steps
+- `9093b55`–`5d991c9` — Magnitude slider clamping, default -150 dB
+- `d62136d` — Decimation-based frequency zoom (server DSP + client UI)
+- `7094804` — Freq cursors / ruler / plugin targets honour effective SR under freq zoom
+- `8905dac` — Time cursors honour Zoom Out Level
+- `375f2f2` — Incremental tile compositing + network-level aborts
+- `c40e8ca` — Float32 spectrogram tiles + client-side colormap + threadpool FFT
+- `40b8eb5` — Live-reload local datasource with a Refresh button
+- `e9df3eb` — Time zoom-in slider + Show Annotations toggle
+- `eb76b6f` — Smooth scroll: slide the composite instead of repainting
+- `26fab3c` — Y-axis ruler: show unit, honour zoom, one unit per ruler
 
 ---
 
@@ -186,19 +199,72 @@ Query params: `fft_size`, `cmap`, `max_rows` (strip height after decimation, def
 ### M8 — GPU Acceleration & Tile Caching
 
 - [ ] Optional `cupy` path in `spectrogram_engine.compute_spectrogram_db` with auto-fallback to numpy
-- [ ] Filesystem tile cache at `$IQENGINE_TILE_CACHE_DIR/{path}/z{zoom}/t{index}.png` (lazy, LRU eviction)
+- [ ] Filesystem tile cache at `$IQENGINE_TILE_CACHE_DIR/{path}/z{zoom}/t{index}.f32` (lazy, LRU eviction). Keyed by `{zoom, tileIndex, window, freqZoomKey}` to match the client-side cache — colormap / mag no longer invalidate since clients colormap float32 tiles themselves.
 
-### Nice-to-haves
+### M9 — Live SDR (done 2026-04-17)
 
+- [x] M9.1 `fc87b77` Add rolling IQ buffer, live spectrum WS, and snapshot endpoint
+- [x] M9.2 `fc7a3ce` Add gqrx-style /sdr/live page with live spectrum, waterfall, and snapshots
+- [x] M9.3 `a3ef9b8` Live demodulation + audio streaming
+- [x] `036ad6e` — keep waterfall pixels crisp when resizing
+- [x] `b15e416` — live view unified into the recording-view shell (shared tab strip, sidebar, bottom accordion)
+
+### M10 — Server/Client Perf & UX (done 2026-04-20)
+
+Net effect: tile fetches roughly parallel across cores on the server, cache survives colormap/magnitude/window changes, recolor is a pure client-side GPU pass, and wheel-scroll slides the existing composite instead of repainting it.
+
+- [x] `asyncio.to_thread` around the FFT/colormap/PNG pipeline so tile requests parallelize across cores instead of serializing on the asyncio event loop
+- [x] Float32 dB tiles + client-side colormap via `dbTileToImageData` — colormap / magMin / magMax slider drags produce zero network traffic
+- [x] Incremental compositing: blit each tile as it arrives (rAF-throttled) instead of waiting on `Promise.all`
+- [x] Network-level AbortSignal threaded into `fetch()` so scroll cancels close the socket
+- [x] `canvas.transferToImageBitmap()` replaces `convertToBlob + createImageBitmap` (no PNG encode/decode per frame)
+- [x] Smooth scroll: hook returns `imageOffsetY`; `<Image y={...}>` slides the composite when visible tile set is unchanged, repaint only on tile-boundary crossing
+- [x] Zoom Out Level: power-of-two steps, each slider position produces a visibly different zoom level
+- [x] Zoom Out Level wired to the server-side path (was hardcoded `max_zoom`)
+- [x] Zoom In (1×-16×) slider for short signals, plays well with Zoom Out via `rowsPerPixel = (fftStepSize + 1) / max(1, timeZoomIn)`
+- [x] Decimation-based frequency zoom — server mixes to zoom center, FIR LPF, decimates, re-FFTs at same `fft_size` for real additional resolution over the narrow band
+- [x] Freq/time cursor labels, ruler-top, plugin `target_freq` / `if_bandwidth` all honour `effectiveSampleRateHz` / `effectiveCenterFreqHz` under freq zoom
+- [x] Time-cursor math (render + drag + default seed) scales by `rowsPerPixel`
+- [x] Y-axis ruler: one unit (µs / ms / s) per ruler, suffix on every label, scales with zoom
+- [x] Hide Annotations toggle
+- [x] Magnitude slider: floor -200 dB, default -150 dB, minValue clamped to avoid off-column overflow
+- [x] Live-reload datasource (Refresh button + `POST /api/datasources/{account}/{container}/resync-local`, gated on `IN_MEMORY_DB=1`)
+
+### Plugins / demod (done 2026-04-20)
+
+- [x] NFM, AM, USB, LSB receivers alongside the existing WFM `fm_receiver`. All output 48 kHz mono PCM WAV
+- [x] Gain slider on every demod plugin (auto-normalize → gain → clip → quantize)
+- [x] In-browser WAV playback in the plugin output modal
+- [x] Chunked streaming demod: first audio starts after one chunk's round-trip (~2 s) rather than the whole recording's demod time; Web Audio API schedules the chunks sample-accurately
+- [x] Full-file fallback: running a plugin without time cursors demods the whole `.sigmf-data` file
+- [x] Freq-cursor → plugin `target_freq` / `if_bandwidth` / `audio_bandwidth` autopopulate
+
+### Nice-to-haves / next round
+
+Infra / deploy:
 - [ ] `docs/sdr-setup-n20.md` with full SoapySDR build-from-source instructions for the n20 pyenv 3.11 environment (so next time it's reproducible)
 - [ ] Build the SoapySDR Python bindings wheel and vendor it in `api/vendor/` so any Python 3.11 environment can install it
 - [ ] Write the n20 setup as `make setup-n20` in the Makefile
-- [ ] Zoom-out support: `use-server-spectrogram.tsx` currently always uses max_zoom. Wire `fftStepSize` context value to the zoom parameter
-- [ ] Server-side FFT + annotation overlay: currently annotations are drawn in a separate Konva layer on top of the image, which works for both client and server paths, but the annotation Y positions assume client FFT row indexing. Verify this still lines up correctly with server tiles
-- [ ] Agent `/capture-and-analyze` should wait for capture completion and return spectrogram + analysis in one response (currently just returns job_id)
-- [ ] `POST /api/datasources/local/local/sync` (no auth required in local mode) so newly dropped files are picked up without restarting the API
-- [ ] Add a HackRF gain ladder (LNA + VGA + AMP) exposed in the capture form instead of a single `gain` parameter
-- [ ] SDR_ENABLED feature flag should also hide the `/sdr` link in the client nav when disabled
+
+Perf / architecture (next scrolling layer):
+- [ ] **Oversized tile ring buffer.** Today the fast-path slide works within the currently-painted tile set, but crossing a tile boundary still triggers a repaint (visible even if brief). Paint an off-screen buffer ≥ 2× viewport so neighbouring tiles are pre-composed, invalidate only when the scroll window moves outside the buffered region. Then tile-boundary crossings are invisible and repaint moves to the "you wandered a long way" threshold.
+- [ ] **Server-side `request.is_disconnected()` polling** in the tile handler so abandoned numpy work can abort mid-computation. Today a cancelled request still burns CPU to completion because the numpy call doesn't yield. Right shape: yield control every ~250 ms inside `compute_tile_db` and bail if the client is gone.
+- [ ] **Per-tile ImageBitmap cache** in `use-server-spectrogram`. Currently the hook recolors from raw dB on every full repaint; for drag-scrolling across many tiles this adds ~5 ms per tile per commit. Cache the post-colormap `ImageBitmap` keyed by `{tileKey, colmap, magMin, magMax}`, invalidate on slider change, so the repaint path is just N × drawImage.
+- [ ] **M8 GPU FFT** (see above). With `asyncio.to_thread` + OpenBLAS threading already in place, CPU throughput is decent; cupy gives another ~10-100× on large `fft_size`. Keep the numpy fallback.
+
+Missing features:
+- [ ] **Client-side freq zoom.** The server path has decimation-based zoom (`apply_freq_zoom` + `compute_tile_db`). For small recordings the client-side FFT path (`use-spectrogram.tsx` + `use-get-image.tsx`) is used instead and freq zoom silently does nothing. Mirror the DSP on the client (shift + LPF + decimate) so zoom works for sub-10 M-sample files too.
+- [ ] **Horizontal scroll + freq-axis pan.** Today freq zoom re-centers on the freq-cursor box, but there's no way to pan left/right from there. Add a horizontal scrollbar + drag-to-pan inside the zoomed band.
+- [ ] **SSB audio quality.** Current `usb_receiver` / `lsb_receiver` do LPF + real-part SSB demod. Works for clean signals, noisy for marginal ones. Upgrade to a Weaver demodulator or a proper analytic-filter SSB.
+- [ ] **Live page ↔ recording-view full shell unification.** Cross-nav (tabs) is done but the live page has its own sidebar layout. Extract an `<RfViewShell>` component and mount both pages inside it so they share stylings + bottom accordion.
+- [ ] **Live SDR min/max dB colormap sliders persistence** + per-device presets so flipping between 900 MHz HackRF and 49.5 MHz FSW doesn't need re-tuning each time.
+- [ ] HackRF gain ladder (LNA + VGA + AMP) exposed in both the capture form and `/sdr/live` instead of a single `gain` parameter
+- [ ] `SDR_ENABLED` feature flag should also hide the Live tab / `/sdr` links when disabled
+
+Polish:
+- [ ] Server-side FFT + annotation overlay: annotation Y positions were updated to use `rowsPerPixel` in this round, but the `onDragEnd` sample math was also updated and deserves a visual regression sanity check on a recording with many annotations
+- [ ] Agent `/capture-and-analyze` should wait for capture completion and return spectrogram + analysis in one response (currently just returns `job_id`)
+- [ ] Untracked screenshots from dev sessions (`*.png` in repo root, `.playwright-mcp/`) should go into `.gitignore` so they don't clutter `git status`. Safe to delete the current set; they were only used to walk through Playwright tests.
 
 ---
 

@@ -56,5 +56,9 @@ tiling/spectrogram.pmtiles
 
 e2e/test.zip
 python-env
+
+# dev-session screenshots + playwright scratch output (not part of repo)
+/*.png
+/.playwright-mcp/
 api/converters/vita49_to_sigmf/tests/custom_ofdm_out0x0.sigmf-meta
 api/converters/vita49_to_sigmf/tests/custom_ofdm_out0x0.sigmf-data
