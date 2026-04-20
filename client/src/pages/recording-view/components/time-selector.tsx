@@ -15,13 +15,18 @@ interface TimeSelectorProps {
 const TimeSelector = ({ currentFFT }: TimeSelectorProps) => {
   const [diffSamples, setDiffSamples] = useState('');
   const [diffSeconds, setDiffSeconds] = useState('');
-  const { spectrogramWidth, spectrogramHeight, meta, fftSize } = useSpectrogramContext();
+  const { spectrogramWidth, spectrogramHeight, meta, fftSize, fftStepSize } = useSpectrogramContext();
   const { cursorTime, cursorTimeEnabled, setCursorTime } = useCursorContext();
 
+  // Under Zoom Out Level > 0 each viewport pixel aggregates (fftStepSize + 1) source
+  // FFT rows. The sample math below must scale by this factor in both directions so
+  // a visually-sizable drag yields a time span that matches how much of the recording
+  // the selection actually covers.
+  const rowsPerPixel = fftStepSize + 1;
   const cursorStartFFT = Math.floor(cursorTime.start / fftSize);
   const cursorEndFFT = Math.floor(cursorTime.end / fftSize);
-  const cursorYStart = cursorStartFFT - currentFFT;
-  const cursorYEnd = cursorEndFFT - currentFFT;
+  const cursorYStart = (cursorStartFFT - currentFFT) / rowsPerPixel;
+  const cursorYEnd = (cursorEndFFT - currentFFT) / rowsPerPixel;
 
   // update diff
   useEffect(() => {
@@ -33,10 +38,13 @@ const TimeSelector = ({ currentFFT }: TimeSelectorProps) => {
     setDiffSeconds('Δ ' + formattedSeconds.time + ' ' + formattedSeconds.unit);
   }, [cursorTime, cursorTimeEnabled]);
 
+  const sampleAtPixelY = (pixelY: number) =>
+    Math.max(currentFFT * fftSize, (currentFFT + pixelY * rowsPerPixel) * fftSize);
+
   // Sample-start bar
   const handleDragMoveStart = (e) => {
     e.target.x(0); // keep line in the same x location
-    const newStartSample = Math.max(currentFFT * fftSize, (currentFFT + e.target.y()) * fftSize);
+    const newStartSample = sampleAtPixelY(e.target.y());
     // check if there is the need to reverse the two
     if (newStartSample > cursorTime.end) {
       setCursorTime({
@@ -54,7 +62,7 @@ const TimeSelector = ({ currentFFT }: TimeSelectorProps) => {
   // Sample-end bar
   const handleDragMoveEnd = (e) => {
     e.target.x(0); // keep line in the same x location
-    const newStartSample = Math.max(currentFFT * fftSize, (currentFFT + e.target.y()) * fftSize);
+    const newStartSample = sampleAtPixelY(e.target.y());
     if (newStartSample > cursorTime.start) {
       setCursorTime({
         start: cursorTime.start,

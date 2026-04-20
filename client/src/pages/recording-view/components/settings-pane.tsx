@@ -126,9 +126,13 @@ const SettingsPane = ({ currentFFT }) => {
           checked={cursorContext.cursorTimeEnabled}
           onChange={(e) => {
             if (!cursorContext.cursorTimeEnabled && cursorContext.cursorTime.start == cursorContext.cursorTime.end) {
+              // Under zoom-out each viewport pixel covers (fftStepSize + 1) source
+              // FFT rows, so the default selection has to scale the same way to stay
+              // a visible quarter-to-half of the spectrogram.
+              const rowsPerPixel = context.fftStepSize + 1;
               cursorContext.setCursorTime({
-                start: (currentFFT + context.spectrogramHeight / 4) * context.fftSize,
-                end: (currentFFT + context.spectrogramHeight / 2) * context.fftSize,
+                start: (currentFFT + (context.spectrogramHeight / 4) * rowsPerPixel) * context.fftSize,
+                end: (currentFFT + (context.spectrogramHeight / 2) * rowsPerPixel) * context.fftSize,
               });
             }
             cursorContext.setCursorTimeEnabled(e.target.checked);
