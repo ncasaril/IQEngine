@@ -119,77 +119,79 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
       cmap: colmap,
       magMin: magnitudeMin,
       magMax: magnitudeMax,
+      signal: controller.signal,
       ...(freqZoom ? { freqCenterHz: freqZoom.freqCenterHz, freqBandwidthHz: freqZoom.freqBandwidthHz } : {}),
     };
 
-    // Check cache, fetch missing tiles
     const zoomKey = freqZoom ? `${freqZoom.freqCenterHz}:${freqZoom.freqBandwidthHz}` : 'full';
-    const promises = visibleIndices.map(async (tileIndex) => {
+    const zoomLevel = tileInfo.zoom_levels[zoom];
+    const rowsPerTileRow = zoomLevel?.rows_per_tile_row ?? 1;
+    const tileHeightRows = tileInfo.tile_height;
+
+    // Incremental composition: blit each tile onto the composite canvas as it
+    // resolves (from cache or network) and refresh the <Image> bitmap, rAF-
+    // throttled. One slow tile no longer blocks the whole viewport from showing.
+    const canvas = new OffscreenCanvas(spectrogramWidth, spectrogramHeight);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      setLoading(false);
+      return;
+    }
+    ctx.fillStyle = 'black';
+    ctx.fillRect(0, 0, spectrogramWidth, spectrogramHeight);
+
+    let refreshPending = false;
+    const scheduleRefresh = () => {
+      if (refreshPending || controller.signal.aborted) return;
+      refreshPending = true;
+      requestAnimationFrame(() => {
+        refreshPending = false;
+        if (controller.signal.aborted) return;
+        canvas.convertToBlob().then((blob) => {
+          if (controller.signal.aborted) return;
+          createImageBitmap(blob).then((bmp) => {
+            if (!controller.signal.aborted) setImage(bmp);
+          });
+        });
+      });
+    };
+
+    const paintTile = (tile: TileResult) => {
+      const tileStartFFT = tile.timeIndex * tileHeightRows * rowsPerTileRow;
+      const yOffset = (tileStartFFT - currentFFT) / rowsPerTileRow;
+      ctx.drawImage(tile.image, 0, yOffset, spectrogramWidth, tile.rows);
+    };
+
+    const perTile = visibleIndices.map(async (tileIndex) => {
       const cacheKey = `${zoom}/${tileIndex}/${colmap}/${magnitudeMin}/${magnitudeMax}/${windowFunction}/${zoomKey}`;
       const cached = tileCache.current.get(cacheKey);
-      if (cached) return cached;
+      if (cached) {
+        if (controller.signal.aborted) return;
+        paintTile(cached);
+        scheduleRefresh();
+        return;
+      }
 
       try {
         const result = await fetchTile(account, container, filePath, zoom, tileIndex, fetchOptions);
+        if (controller.signal.aborted) return;
         tileCache.current.set(cacheKey, result);
-
-        // Evict old entries if cache too large
         if (tileCache.current.size > 200) {
           const firstKey = tileCache.current.keys().next().value;
           if (firstKey !== undefined) tileCache.current.delete(firstKey);
         }
-
-        return result;
-      } catch (err) {
-        if (!controller.signal.aborted) {
+        paintTile(result);
+        scheduleRefresh();
+      } catch (err: any) {
+        // AbortError during a scroll is expected — don't log.
+        if (!controller.signal.aborted && err?.name !== 'AbortError') {
           console.error(`Failed to fetch tile ${zoom}/${tileIndex}:`, err);
         }
-        return null;
       }
     });
 
-    Promise.all(promises).then((tiles) => {
-      if (controller.signal.aborted) return;
-
-      const validTiles = tiles.filter((t): t is TileResult => t !== null);
-      if (validTiles.length === 0) {
-        setLoading(false);
-        return;
-      }
-
-      // Composite tiles onto an offscreen canvas
-      const canvas = new OffscreenCanvas(spectrogramWidth, spectrogramHeight);
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        setLoading(false);
-        return;
-      }
-
-      ctx.fillStyle = 'black';
-      ctx.fillRect(0, 0, spectrogramWidth, spectrogramHeight);
-
-      const zoomLevel = tileInfo.zoom_levels[zoom];
-      const rowsPerTileRow = zoomLevel?.rows_per_tile_row ?? 1;
-      const tileHeight = tileInfo.tile_height;
-
-      for (const tile of validTiles) {
-        // Calculate Y position of this tile in the viewport
-        const tileStartFFT = tile.timeIndex * tileHeight * rowsPerTileRow;
-        const yOffset = (tileStartFFT - currentFFT) / rowsPerTileRow;
-
-        // Scale tile to fill viewport width
-        ctx.drawImage(tile.image, 0, yOffset, spectrogramWidth, tile.rows);
-      }
-
-      canvas.convertToBlob().then((blob) => {
-        if (controller.signal.aborted) return;
-        createImageBitmap(blob).then((bmp) => {
-          if (!controller.signal.aborted) {
-            setImage(bmp);
-            setLoading(false);
-          }
-        });
-      });
+    Promise.allSettled(perTile).then(() => {
+      if (!controller.signal.aborted) setLoading(false);
     });
 
     return () => {

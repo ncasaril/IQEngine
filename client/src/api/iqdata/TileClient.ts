@@ -75,6 +75,7 @@ export async function fetchTile(
     magMax?: number;
     freqCenterHz?: number;
     freqBandwidthHz?: number;
+    signal?: AbortSignal;
   } = {}
 ): Promise<TileResult> {
   const params = new URLSearchParams();
@@ -89,7 +90,7 @@ export async function fetchTile(
   }
 
   const url = `/api/datasources/${account}/${container}/${filePath}/spectrogram/tile/${zoom}/${timeIndex}?${params.toString()}`;
-  const resp = await fetch(url);
+  const resp = await fetch(url, { signal: options.signal });
   if (!resp.ok) {
     throw new Error(`Failed to fetch tile ${zoom}/${timeIndex}: ${resp.status}`);
   }
