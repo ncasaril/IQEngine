@@ -23,8 +23,11 @@ const AnnotationViewer = ({ currentFFT }: AnnotationViewerProps) => {
     fftStepSize,
     selectedAnnotation,
     setSelectedAnnotation,
+    showAnnotations,
+    timeZoomIn,
   } = useSpectrogramContext();
 
+  const rowsPerPixel = (fftStepSize + 1) / Math.max(1, timeZoomIn);
   const lower_freq = meta.getCenterFrequency() - meta.getSampleRate() / 2;
   const [editAnnotationLabelId, setEditAnnotationLabelId] = useState(null);
   const [editAnnotationLabelText, setEditAnnotationLabelText] = useState(null);
@@ -73,8 +76,8 @@ const AnnotationViewer = ({ currentFFT }: AnnotationViewerProps) => {
 
     // Getting new values for the annotation
     const newValues = {
-      'core:sample_start': (annotations[annot_indx].y1 + currentFFT) * fftSize * (fftStepSize + 1),
-      'core:sample_count': (annotations[annot_indx].y2 - annotations[annot_indx].y1) * fftSize * (fftStepSize + 1),
+      'core:sample_start': (currentFFT + annotations[annot_indx].y1 * rowsPerPixel) * fftSize,
+      'core:sample_count': (annotations[annot_indx].y2 - annotations[annot_indx].y1) * rowsPerPixel * fftSize,
       'core:freq_lower_edge': annotations[annot_indx].x1 * meta.getSampleRate() + lower_freq,
       'core:freq_upper_edge': annotations[annot_indx].x2 * meta.getSampleRate() + lower_freq,
     };
@@ -91,7 +94,7 @@ const AnnotationViewer = ({ currentFFT }: AnnotationViewerProps) => {
 
   const annotations = useMemo(() => {
     const minimumFFT = currentFFT;
-    const maximumFFT = currentFFT + spectrogramHeight * (fftStepSize + 1);
+    const maximumFFT = currentFFT + spectrogramHeight * rowsPerPixel;
     const annotations = meta.annotations.map((annotation, index) => {
       if (!annotation['core:sample_count']) {
         return;
@@ -106,8 +109,8 @@ const AnnotationViewer = ({ currentFFT }: AnnotationViewerProps) => {
       return {
         x1: (annotation['core:freq_lower_edge'] - capture['core:frequency']) / meta.getSampleRate() + 0.5,
         x2: (annotation['core:freq_upper_edge'] - capture['core:frequency']) / meta.getSampleRate() + 0.5,
-        y1: (start - minimumFFT) / (fftStepSize + 1),
-        y2: (end - minimumFFT) / (fftStepSize + 1),
+        y1: (start - minimumFFT) / rowsPerPixel,
+        y2: (end - minimumFFT) / rowsPerPixel,
         label: annotation.getLabel(),
         comment: annotation.getComment(),
         shortComment: annotation.getShortComment(),
@@ -117,7 +120,7 @@ const AnnotationViewer = ({ currentFFT }: AnnotationViewerProps) => {
       };
     });
     return annotations;
-  }, [meta, currentFFT, fftStepSize, fftSize, spectrogramWidth]);
+  }, [meta, currentFFT, fftStepSize, fftSize, spectrogramWidth, rowsPerPixel]);
 
   // add cursor styling
   function onMouseOver() {
@@ -178,6 +181,8 @@ const AnnotationViewer = ({ currentFFT }: AnnotationViewerProps) => {
     },
     [setSelectedAnnotation]
   );
+
+  if (!showAnnotations) return null;
 
   return (
     <Layer>

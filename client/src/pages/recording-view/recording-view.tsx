@@ -38,6 +38,7 @@ export function DisplaySpectrogram({ currentFFT, setCurrentFFT, currentTab }) {
     windowFunction,
     fftSize,
     fftStepSize,
+    timeZoomIn,
     meta,
     setSpectrogramWidth,
     setSpectrogramHeight,
@@ -72,8 +73,12 @@ export function DisplaySpectrogram({ currentFFT, setCurrentFFT, currentTab }) {
 
   function handleWheel(evt: KonvaEventObject<WheelEvent>): void {
     evt.evt.preventDefault();
-    const scrollAmount = Math.floor(evt.evt.deltaY);
-    const nextPosition = currentFFT + scrollAmount + spectrogramHeight * (fftStepSize + 1);
+    const rowsPerPixel = (fftStepSize + 1) / Math.max(1, timeZoomIn);
+    // Scroll rate adjusts with zoom: one pixel of deltaY should move currentFFT by
+    // the same number of source rows that pixel represents, so wheel feel stays
+    // consistent between zoomed-in and zoomed-out views.
+    const scrollAmount = Math.floor(evt.evt.deltaY * rowsPerPixel);
+    const nextPosition = currentFFT + scrollAmount + spectrogramHeight * rowsPerPixel;
     const maxPosition = meta.getTotalSamples() / fftSize;
 
     if (nextPosition < maxPosition) {

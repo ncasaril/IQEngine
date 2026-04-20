@@ -35,6 +35,7 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     magnitudeMax,
     freqZoomCenterHz,
     freqZoomBandwidthHz,
+    timeZoomIn,
   } = useSpectrogramContext();
   const freqZoom =
     freqZoomCenterHz != null && freqZoomBandwidthHz != null && freqZoomBandwidthHz > 0
@@ -138,17 +139,20 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     // Render a dB tile with the CURRENT colormap + magnitude slider values, then
     // blit onto the composite canvas at the right Y. Colormap / mag aren't part of
     // the cache key, so slider changes just re-run this pass on cached tiles.
+    // Zoom-in stretches the tile vertically by `timeZoomIn`. Positions are computed
+    // the same way (tileStartFFT - currentFFT) / rowsPerTileRow and then multiplied
+    // by timeZoomIn so a 256-row tile paints as e.g. 512 viewport rows when 2×
+    // zoomed in. It's a pure drawImage scale — no extra server roundtrip.
     const paintTile = (tile: TileDbResult) => {
       if (tile.rows === 0 || tile.cols === 0) return;
       const imgData = dbTileToImageData(tile.db, tile.rows, tile.cols, magnitudeMin, magnitudeMax, colmap);
-      // Put onto a scratch canvas so we can draw-scale it to spectrogramWidth.
       const scratch = new OffscreenCanvas(tile.cols, tile.rows);
       const sctx = scratch.getContext('2d');
       if (!sctx) return;
       sctx.putImageData(imgData, 0, 0);
       const tileStartFFT = tile.timeIndex * tileHeightRows * rowsPerTileRow;
-      const yOffset = (tileStartFFT - currentFFT) / rowsPerTileRow;
-      ctx.drawImage(scratch, 0, yOffset, spectrogramWidth, tile.rows);
+      const yOffset = ((tileStartFFT - currentFFT) / rowsPerTileRow) * timeZoomIn;
+      ctx.drawImage(scratch, 0, yOffset, spectrogramWidth, tile.rows * timeZoomIn);
     };
 
     const perTile = visibleIndices.map(async (tileIndex) => {
@@ -200,6 +204,7 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     fftStepSize,
     freqZoomCenterHz,
     freqZoomBandwidthHz,
+    timeZoomIn,
     account,
     container,
     filePath,

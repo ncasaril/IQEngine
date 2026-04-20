@@ -15,14 +15,12 @@ interface TimeSelectorProps {
 const TimeSelector = ({ currentFFT }: TimeSelectorProps) => {
   const [diffSamples, setDiffSamples] = useState('');
   const [diffSeconds, setDiffSeconds] = useState('');
-  const { spectrogramWidth, spectrogramHeight, meta, fftSize, fftStepSize } = useSpectrogramContext();
+  const { spectrogramWidth, spectrogramHeight, meta, fftSize, fftStepSize, timeZoomIn } = useSpectrogramContext();
   const { cursorTime, cursorTimeEnabled, setCursorTime } = useCursorContext();
 
-  // Under Zoom Out Level > 0 each viewport pixel aggregates (fftStepSize + 1) source
-  // FFT rows. The sample math below must scale by this factor in both directions so
-  // a visually-sizable drag yields a time span that matches how much of the recording
-  // the selection actually covers.
-  const rowsPerPixel = fftStepSize + 1;
+  // Zoom Out > 0 aggregates (fftStepSize + 1) source FFT rows per pixel. Zoom In > 1
+  // stretches one source row across multiple pixels. Net rowsPerPixel handles both.
+  const rowsPerPixel = (fftStepSize + 1) / Math.max(1, timeZoomIn);
   const cursorStartFFT = Math.floor(cursorTime.start / fftSize);
   const cursorEndFFT = Math.floor(cursorTime.end / fftSize);
   const cursorYStart = (cursorStartFFT - currentFFT) / rowsPerPixel;

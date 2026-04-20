@@ -103,7 +103,7 @@ const SettingsPane = ({ currentFFT }) => {
   return (
     <div className="form-control">
       <label className="mb-3" id="formZoom">
-        <span className="label-text text-base ">Zoom Out Level</span>
+        <span className="label-text text-base">Zoom Out Level</span>
         <input
           type="range"
           className="range range-xs range-primary"
@@ -114,6 +114,26 @@ const SettingsPane = ({ currentFFT }) => {
           onChange={(e) => {
             const newZoomLevel = zoomStepSizes[parseInt(e.target.value)];
             context.setFFTStepSize(newZoomLevel);
+            if (newZoomLevel > 0 && context.timeZoomIn > 1) context.setTimeZoomIn(1);
+          }}
+        />
+      </label>
+
+      <label className="mb-3">
+        <span className="label-text text-base">
+          Zoom In {context.timeZoomIn > 1 ? `(${context.timeZoomIn}×)` : ''}
+        </span>
+        <input
+          type="range"
+          className="range range-xs range-primary"
+          value={Math.log2(context.timeZoomIn)}
+          min={0}
+          max={4}
+          step={1}
+          onChange={(e) => {
+            const factor = 1 << parseInt(e.target.value);
+            context.setTimeZoomIn(factor);
+            if (factor > 1 && context.fftStepSize > 0) context.setFFTStepSize(0);
           }}
         />
       </label>
@@ -138,6 +158,16 @@ const SettingsPane = ({ currentFFT }) => {
             cursorContext.setCursorTimeEnabled(e.target.checked);
             context.setCanDownload(e.target.checked);
           }}
+        />
+      </label>
+
+      <label className="mb-1" id="toggle">
+        <span className="label-text text-base">Show Annotations</span>
+        <input
+          type="checkbox"
+          className="toggle toggle-primary float-right"
+          checked={context.showAnnotations}
+          onChange={(e) => context.setShowAnnotations(e.target.checked)}
         />
       </label>
 

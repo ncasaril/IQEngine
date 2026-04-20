@@ -56,6 +56,14 @@ interface SpectrogramContextProperties {
   // they agree with the displayed spectrum.
   effectiveSampleRateHz: number;
   effectiveCenterFreqHz: number;
+  // Time-axis zoom-in factor (1, 2, 4, 8...). 1 = 1:1 pixel-per-source-row. >1 =
+  // each source FFT row is stretched across multiple pixels. fftStepSize and
+  // timeZoomIn are mutually exclusive — setting timeZoomIn > 1 forces
+  // fftStepSize to 0 so the viewport shows a shorter segment in higher detail.
+  timeZoomIn: number;
+  setTimeZoomIn: (v: number) => void;
+  showAnnotations: boolean;
+  setShowAnnotations: (v: boolean) => void;
 }
 
 export const SpectrogramContext = createContext<SpectrogramContextProperties>(null);
@@ -98,6 +106,8 @@ export function SpectrogramContextProvider({
   const [serverSideFFT, setServerSideFFT] = useState<boolean>(false);
   const [freqZoomCenterHz, setFreqZoomCenterHz] = useState<number | null>(null);
   const [freqZoomBandwidthHz, setFreqZoomBandwidthHz] = useState<number | null>(null);
+  const [timeZoomIn, setTimeZoomIn] = useState<number>(1);
+  const [showAnnotations, setShowAnnotations] = useState<boolean>(true);
   const setFreqZoom = (params: { centerHz: number; bandwidthHz: number } | null) => {
     if (!params) {
       setFreqZoomCenterHz(null);
@@ -185,6 +195,10 @@ export function SpectrogramContextProvider({
         setFreqZoom,
         effectiveSampleRateHz,
         effectiveCenterFreqHz,
+        timeZoomIn,
+        setTimeZoomIn,
+        showAnnotations,
+        setShowAnnotations,
       }}
     >
       {children}
