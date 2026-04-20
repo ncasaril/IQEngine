@@ -10,13 +10,16 @@ from helpers.datasource_access import check_access
 from helpers.samples import get_bytes_per_iq_sample, get_samples
 import asyncio
 
+from helpers import tile_cache
 from helpers.spectrogram_engine import (
     TileCancelled,
+    apply_colormap,
     apply_freq_zoom,
     compute_spectrogram_db,
     compute_tile,
     compute_tile_db,
     compute_tile_info,
+    rgb_to_png,
     zoom_decimation_factor,
 )
 from helpers.urlmapping import ApiType, get_file_name
@@ -185,6 +188,47 @@ async def get_spectrogram_tile(
     if start_fft >= total_ffts:
         raise HTTPException(status_code=404, detail="Tile index out of range")
 
+    # Filesystem cache key: includes everything that changes the dB tile content
+    # but NOT colormap/magnitude (those are applied client-side or re-applied per
+    # PNG request without recomputing the FFT).
+    zoom_key = "full"
+    if freq_bandwidth_hz and freq_bandwidth_hz > 0 and freq_center_hz is not None:
+        zoom_key = f"{freq_center_hz}:{freq_bandwidth_hz}"
+    cache_path_key = f"{datasource.account}/{datasource.container}/{filepath}"
+
+    cached_db = tile_cache.load_tile(
+        cache_path_key, fft_size, window, zoom_key, zoom, time_index
+    )
+    if cached_db is not None:
+        if format == "float32":
+            return Response(
+                content=cached_db.tobytes(),
+                media_type="application/octet-stream",
+                headers={
+                    "X-Tile-Rows": str(cached_db.shape[0]),
+                    "X-Tile-Cols": str(cached_db.shape[1]),
+                    "X-Tile-Dtype": "float32",
+                    "X-Tile-Cache": "hit",
+                    "Cache-Control": "public, max-age=31536000, immutable",
+                },
+            )
+        # PNG path: colormap + PNG encode only (no FFT).
+        def _encode_sync():
+            rgb = apply_colormap(cached_db, cmap=cmap, mag_min=mag_min, mag_max=mag_max)
+            return rgb_to_png(rgb), {"rows": rgb.shape[0], "cols": rgb.shape[1]}
+
+        png_bytes, tile_meta = await asyncio.to_thread(_encode_sync)
+        return Response(
+            content=png_bytes,
+            media_type="image/png",
+            headers={
+                "X-Tile-Rows": str(tile_meta["rows"]),
+                "X-Tile-Cols": str(tile_meta["cols"]),
+                "X-Tile-Cache": "hit",
+                "Cache-Control": "public, max-age=31536000, immutable",
+            },
+        )
+
     # Read the original-rate samples that will produce (end_fft - start_fft) rows
     # at the decimated rate.
     sample_start = start_fft * effective_samples_per_row
@@ -231,34 +275,24 @@ async def get_spectrogram_tile(
             )
         sub_total_ffts = end_fft - start_fft
         sub_max_zoom = max(0, math.ceil(math.log2(max(sub_total_ffts / tile_height, 1))))
-        if format == "float32":
-            db = compute_tile_db(
-                s,
-                fft_size=fft_size,
-                zoom=0,
-                time_index=0,
-                tile_height=tile_height,
-                window=window,
-                total_ffts=sub_total_ffts,
-                max_zoom=sub_max_zoom,
-                cancel=cancel_event.is_set,
-            )
-            return ("float32", db)
-        png_bytes, tile_meta = compute_tile(
+        db = compute_tile_db(
             s,
             fft_size=fft_size,
             zoom=0,
             time_index=0,
             tile_height=tile_height,
             window=window,
-            cmap=cmap,
-            mag_min=mag_min,
-            mag_max=mag_max,
             total_ffts=sub_total_ffts,
             max_zoom=sub_max_zoom,
             cancel=cancel_event.is_set,
         )
-        return ("png", png_bytes, tile_meta)
+        if format == "float32":
+            return ("float32", db)
+        if cancel_event.is_set():
+            raise TileCancelled()
+        rgb = apply_colormap(db, cmap=cmap, mag_min=mag_min, mag_max=mag_max)
+        png_bytes = rgb_to_png(rgb)
+        return ("png", png_bytes, {"rows": rgb.shape[0], "cols": rgb.shape[1]}, db)
 
     try:
         result = await asyncio.to_thread(_compute_sync)
@@ -277,6 +311,7 @@ async def get_spectrogram_tile(
 
     if result[0] == "float32":
         db = result[1]
+        tile_cache.save_tile(cache_path_key, fft_size, window, zoom_key, zoom, time_index, db)
         return Response(
             content=db.tobytes(),
             media_type="application/octet-stream",
@@ -284,17 +319,20 @@ async def get_spectrogram_tile(
                 "X-Tile-Rows": str(db.shape[0]),
                 "X-Tile-Cols": str(db.shape[1]),
                 "X-Tile-Dtype": "float32",
+                "X-Tile-Cache": "miss",
                 "Cache-Control": "public, max-age=31536000, immutable",
             },
         )
 
-    _, png_bytes, tile_meta = result
+    _, png_bytes, tile_meta, db = result
+    tile_cache.save_tile(cache_path_key, fft_size, window, zoom_key, zoom, time_index, db)
     return Response(
         content=png_bytes,
         media_type="image/png",
         headers={
             "X-Tile-Rows": str(tile_meta["rows"]),
             "X-Tile-Cols": str(tile_meta["cols"]),
+            "X-Tile-Cache": "miss",
             "Cache-Control": "public, max-age=31536000, immutable",
         },
     )

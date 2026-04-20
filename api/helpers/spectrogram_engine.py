@@ -1,5 +1,7 @@
 import io
+import logging
 import math
+import os
 from functools import lru_cache
 from typing import Callable, Optional, Tuple
 
@@ -16,6 +18,41 @@ class TileCancelled(Exception):
 
 
 CancelCheck = Optional[Callable[[], bool]]
+
+
+_logger = logging.getLogger("api")
+
+# Optional cupy GPU FFT path. Gated behind IQENGINE_GPU_FFT=1 so the default
+# remains the well-tested numpy + threadpool path. Falls back silently when
+# cupy is missing or no CUDA device is present.
+try:
+    import cupy as _cp  # type: ignore
+    _HAVE_CUPY = True
+except Exception:
+    _cp = None
+    _HAVE_CUPY = False
+
+_GPU_PROBED = False
+_GPU_OK = False
+
+
+def _gpu_fft_enabled() -> bool:
+    global _GPU_PROBED, _GPU_OK
+    if not _HAVE_CUPY:
+        return False
+    if os.environ.get("IQENGINE_GPU_FFT", "").lower() not in ("1", "true", "yes"):
+        return False
+    if not _GPU_PROBED:
+        _GPU_PROBED = True
+        try:
+            n = _cp.cuda.runtime.getDeviceCount()
+            _GPU_OK = n > 0
+            if _GPU_OK:
+                _logger.info("spectrogram_engine: using cupy GPU FFT (device count=%d)", n)
+        except Exception as exc:
+            _logger.warning("spectrogram_engine: GPU FFT requested but unavailable: %s", exc)
+            _GPU_OK = False
+    return _GPU_OK
 
 # Colormap LUTs — 256x3 uint8 arrays generated from matplotlib colormaps.
 # We store them here to avoid importing matplotlib at runtime (heavy + slow).
@@ -86,25 +123,39 @@ def compute_spectrogram_db(
     # Apply window function (broadcast across rows)
     win = _get_window(window, fft_size)
 
+    use_gpu = _gpu_fft_enabled()
+
     # Process in row chunks so a watchdog can abort a long-running tile. At a
     # 1024-pt FFT each chunk is ~40 ms of numpy work, which gives the caller a
     # cancellation granularity well under a second without noticeable overhead.
     CHUNK_ROWS = 4096
+
+    def _fft_chunk_np(chunk: np.ndarray) -> np.ndarray:
+        windowed = chunk * win
+        result = np.fft.fftshift(np.fft.fft(windowed, axis=1), axes=1) / fft_size
+        return (10.0 * np.log10(np.abs(result) + 1e-12)).astype(np.float32)
+
+    def _fft_chunk_gpu(chunk: np.ndarray) -> np.ndarray:
+        g_chunk = _cp.asarray(chunk)
+        g_win = _cp.asarray(win)
+        windowed = g_chunk * g_win
+        result = _cp.fft.fftshift(_cp.fft.fft(windowed, axis=1), axes=1) / fft_size
+        db_gpu = 10.0 * _cp.log10(_cp.abs(result) + 1e-12)
+        return _cp.asnumpy(db_gpu).astype(np.float32, copy=False)
+
+    fft_chunk = _fft_chunk_gpu if use_gpu else _fft_chunk_np
+
     if num_rows <= CHUNK_ROWS:
         if cancel is not None and cancel():
             raise TileCancelled()
-        windowed = truncated * win
-        result = np.fft.fftshift(np.fft.fft(windowed, axis=1), axes=1) / fft_size
-        return (10.0 * np.log10(np.abs(result) + 1e-12)).astype(np.float32)
+        return fft_chunk(truncated)
 
     out = np.empty((num_rows, fft_size), dtype=np.float32)
     for start in range(0, num_rows, CHUNK_ROWS):
         if cancel is not None and cancel():
             raise TileCancelled()
         end = min(start + CHUNK_ROWS, num_rows)
-        windowed = truncated[start:end] * win
-        result = np.fft.fftshift(np.fft.fft(windowed, axis=1), axes=1) / fft_size
-        out[start:end] = (10.0 * np.log10(np.abs(result) + 1e-12)).astype(np.float32)
+        out[start:end] = fft_chunk(truncated[start:end])
     return out
 
 
