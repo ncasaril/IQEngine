@@ -74,6 +74,10 @@ export function DisplaySpectrogram({ currentFFT, setCurrentFFT, currentTab }) {
   // Server tile hook shifts the composite instead of repainting when a scroll
   // stays within the currently-painted tile set, so honour its Y offset.
   const imageY = serverSideFFT ? serverImageOffsetY : 0;
+  // Server path uses an oversized buffer (taller than the viewport) so scrolls
+  // that cross tile boundaries still fast-path. Draw at the bitmap's natural
+  // height — Konva's Stage clips to its own dimensions.
+  const imageDrawHeight = serverSideFFT && serverImage ? serverImage.height : spectrogramHeight;
 
   function handleWheel(evt: KonvaEventObject<WheelEvent>): void {
     evt.evt.preventDefault();
@@ -107,7 +111,7 @@ export function DisplaySpectrogram({ currentFFT, setCurrentFFT, currentTab }) {
           <div className="flex flex-row" id="spectrogram">
             <Stage width={spectrogramWidth} height={spectrogramHeight}>
               <Layer onWheel={handleWheel} imageSmoothingEnabled={false}>
-                <Image image={image} x={0} y={imageY} width={spectrogramWidth} height={spectrogramHeight} />
+                <Image image={image} x={0} y={imageY} width={spectrogramWidth} height={imageDrawHeight} />
               </Layer>
               <AnnotationViewer currentFFT={currentFFT} />
               <FreqSelector />

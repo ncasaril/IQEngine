@@ -6,17 +6,21 @@
  * scaling is applied in the browser. This decouples the tile cache from the
  * colormap / dB slider / magnitude settings.
  *
- * Scroll optimisation: when a scroll doesn't change which tiles are visible, we
- * skip the canvas repaint entirely and just slide the Konva Image via the
- * returned imageOffsetY. The heavy compose (fetch → recolor → blit → transfer)
- * only fires when a tile boundary is crossed, a dependency changes, or a new
- * tile arrives from the network.
+ * Scroll optimisation: tiles are composed onto an oversized off-screen buffer
+ * (BUFFER_MULTIPLIER × viewport height). As long as the viewport stays inside
+ * the buffer (with a safety margin), scrolls — including those that cross tile
+ * boundaries — only slide the Konva Image via the returned imageOffsetY. We
+ * repaint when the viewport enters the top/bottom margin or a display param
+ * (colormap, magnitude, window, zoom) changes.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { fetchTileDb, fetchTileInfo, getVisibleTiles, TileDbResult, TileInfo } from '@/api/iqdata/TileClient';
 import { dbTileToImageData } from '@/pages/recording-view/utils/db-tile-render';
 import { useSpectrogramContext } from './use-spectrogram-context';
+
+const BUFFER_MULTIPLIER = 3;
+const TRIGGER_MARGIN_RATIO = 0.33;
 
 interface ServerSpectrogramResult {
   image: ImageBitmap | null;
@@ -28,7 +32,10 @@ interface ServerSpectrogramResult {
 
 interface PaintState {
   anchorFFT: number;
-  visibleKey: string;
+  bufferHeightPx: number;
+  atTop: boolean;
+  atBottom: boolean;
+  bufferedKey: string;
   colmap: string;
   magMin: number;
   magMax: number;
@@ -113,22 +120,21 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     if (!tileInfo || !account || !container || !filePath) return;
     if (tileInfoZoomKey !== currentZoomKey) return;
 
-    const visibleIndices = getVisibleTiles(tileInfo, zoom, currentFFT, spectrogramHeight);
-    if (visibleIndices.length === 0) return;
-    const visibleKey = visibleIndices.slice().sort((a, b) => a - b).join(',');
-
     const zoomLevel = tileInfo.zoom_levels[zoom];
     const rowsPerTileRow = zoomLevel?.rows_per_tile_row ?? 1;
     const tileHeightRows = tileInfo.tile_height;
+    const effectiveFfts = zoomLevel?.effective_ffts ?? 0;
+    const totalImagePx = (effectiveFfts * timeZoomIn) | 0;
+    // rowsPerPixel in ORIGINAL FFT row units
+    const rowsPerPixel = rowsPerTileRow / Math.max(1, timeZoomIn);
     const zoomKey = freqZoom ? `${freqZoom.freqCenterHz}:${freqZoom.freqBandwidthHz}` : 'full';
 
     // ---------------- FAST PATH ----------------
-    // Same tiles, same colors, same zoom settings — only currentFFT moved. The
-    // already-painted image is still valid; just shift it on the Konva stage.
+    // Viewport is still inside the currently painted oversized buffer and nothing
+    // about the display params has changed — just slide the composite.
     const p = paintedRef.current;
-    const canShift =
+    if (
       p &&
-      p.visibleKey === visibleKey &&
       p.colmap === colmap &&
       p.magMin === magnitudeMin &&
       p.magMax === magnitudeMax &&
@@ -136,24 +142,42 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
       p.zoomKey === zoomKey &&
       p.zoom === zoom &&
       p.timeZoomIn === timeZoomIn &&
-      p.rowsPerTileRow === rowsPerTileRow;
-
-    if (canShift) {
-      const yShift = ((p.anchorFFT - currentFFT) / rowsPerTileRow) * timeZoomIn;
-      setImageOffsetY(yShift);
-      return;
+      p.rowsPerTileRow === rowsPerTileRow
+    ) {
+      const viewportOffsetPx = ((currentFFT - p.anchorFFT) / rowsPerTileRow) * timeZoomIn;
+      const triggerPx = spectrogramHeight * TRIGGER_MARGIN_RATIO;
+      const topOk = p.atTop || viewportOffsetPx >= triggerPx;
+      const bottomOk = p.atBottom || viewportOffsetPx + spectrogramHeight <= p.bufferHeightPx - triggerPx;
+      if (viewportOffsetPx >= 0 && viewportOffsetPx + spectrogramHeight <= p.bufferHeightPx && topOk && bottomOk) {
+        setImageOffsetY(-viewportOffsetPx);
+        return;
+      }
     }
 
     // ---------------- SLOW PATH ----------------
-    // Tile set or display parameters changed: abort in-flight fetches and
-    // fully re-compose.
+    // Repaint oversized buffer centred on the current viewport.
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     setLoading(true);
 
-    const anchorFFT = currentFFT;
-    setImageOffsetY(0);
+    const desiredBufferPx = Math.max(spectrogramHeight, Math.min(totalImagePx || Infinity, BUFFER_MULTIPLIER * spectrogramHeight));
+    const bufferHeightPx = totalImagePx > 0 ? Math.min(desiredBufferPx, totalImagePx) : desiredBufferPx;
+
+    // Center the viewport within the buffer, clamped to recording bounds.
+    let anchorFFT = Math.floor(currentFFT - ((bufferHeightPx - spectrogramHeight) / 2) * rowsPerPixel);
+    const maxAnchorFFT = totalImagePx > 0 ? Math.max(0, Math.floor((totalImagePx - bufferHeightPx) * rowsPerPixel)) : anchorFFT;
+    if (anchorFFT < 0) anchorFFT = 0;
+    if (anchorFFT > maxAnchorFFT) anchorFFT = maxAnchorFFT;
+    const atTop = anchorFFT === 0;
+    const atBottom = anchorFFT === maxAnchorFFT;
+
+    const bufferedIndices = getVisibleTiles(tileInfo, zoom, anchorFFT, bufferHeightPx);
+    if (bufferedIndices.length === 0) {
+      setLoading(false);
+      return;
+    }
+    const bufferedKey = bufferedIndices.slice().sort((a, b) => a - b).join(',');
 
     const fetchOptions = {
       fftSize,
@@ -162,9 +186,6 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
       ...(freqZoom ? { freqCenterHz: freqZoom.freqCenterHz, freqBandwidthHz: freqZoom.freqBandwidthHz } : {}),
     };
 
-    // Keep track of tiles currently composed so we can re-composite on
-    // progressive arrival without re-running dbTileToImageData for the ones
-    // already blitted in this pass.
     const composedTiles: Map<number, TileDbResult> = new Map();
 
     let refreshPending = false;
@@ -174,13 +195,11 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
       requestAnimationFrame(() => {
         refreshPending = false;
         if (controller.signal.aborted) return;
-        // Fresh canvas per commit so transferToImageBitmap has something to move
-        // without poking a long-lived OffscreenCanvas.
-        const canvas = new OffscreenCanvas(spectrogramWidth, spectrogramHeight);
+        const canvas = new OffscreenCanvas(spectrogramWidth, bufferHeightPx);
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
         ctx.fillStyle = 'black';
-        ctx.fillRect(0, 0, spectrogramWidth, spectrogramHeight);
+        ctx.fillRect(0, 0, spectrogramWidth, bufferHeightPx);
         for (const tile of composedTiles.values()) {
           if (tile.rows === 0 || tile.cols === 0) continue;
           const imgData = dbTileToImageData(tile.db, tile.rows, tile.cols, magnitudeMin, magnitudeMax, colmap);
@@ -192,14 +211,16 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
           const yOffset = ((tileStartFFT - anchorFFT) / rowsPerTileRow) * timeZoomIn;
           ctx.drawImage(scratch, 0, yOffset, spectrogramWidth, tile.rows * timeZoomIn);
         }
-        // transferToImageBitmap is a zero-copy handoff (no PNG encode/decode),
-        // dropping ~10-40 ms per commit vs the old convertToBlob → createImageBitmap.
         const bmp = canvas.transferToImageBitmap();
-        if (!controller.signal.aborted) setImage(bmp);
+        if (!controller.signal.aborted) {
+          setImage(bmp);
+          const viewportOffsetPx = ((currentFFT - anchorFFT) / rowsPerTileRow) * timeZoomIn;
+          setImageOffsetY(-viewportOffsetPx);
+        }
       });
     };
 
-    const perTile = visibleIndices.map(async (tileIndex) => {
+    const perTile = bufferedIndices.map(async (tileIndex) => {
       const cacheKey = `${zoom}/${tileIndex}/${windowFunction}/${zoomKey}`;
       const cached = tileCache.current.get(cacheKey);
       if (cached) {
@@ -228,12 +249,12 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     Promise.allSettled(perTile).then(() => {
       if (!controller.signal.aborted) {
         setLoading(false);
-        // Only record the paint state when all visible tiles have been accounted
-        // for — otherwise a subsequent "same tiles" scroll would short-circuit
-        // while part of the viewport is still black.
         paintedRef.current = {
           anchorFFT,
-          visibleKey,
+          bufferHeightPx,
+          atTop,
+          atBottom,
+          bufferedKey,
           colmap,
           magMin: magnitudeMin,
           magMax: magnitudeMax,
