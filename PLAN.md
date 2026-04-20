@@ -253,6 +253,10 @@ Perf / architecture (next scrolling layer):
 - [ ] **M8 GPU FFT** (see above). With `asyncio.to_thread` + OpenBLAS threading already in place, CPU throughput is decent; cupy gives another ~10-100× on large `fft_size`. Keep the numpy fallback.
 
 Missing features:
+- [ ] **AM/FM demod tab (pulse / TDMA-packet inspector).** New tab to the right of "Time" in the recording-view tab strip, dedicated to looking at a cursor selection as time-domain demodulated audio-rate traces. Split view, two stacked traces against the same X (time):
+  - **Top: AM / envelope** — `|x|` of the freq-shifted + LPF'd IQ so bursts and packet envelopes read cleanly.
+  - **Bottom: FM / quadrature** — `diff(unwrap(angle(x)))` so instantaneous frequency deviations (chirps, FSK symbols, TDMA guard bands) are visible.
+  Share the existing time-cursor selection for the X window; reuse the Frequency Shift cursor for the down-mix center so the user can tune to the signal of interest on the spectrogram and the demod views update. Use the same decimation + LPF helpers as the `nfm_receiver` plugin, decimated to a few kHz so the trace fits the viewport, rendered with `scattergl` like the existing Time tab. This is the "zoom into one pulse" view that today needs a plugin round-trip.
 - [ ] **Client-side freq zoom.** The server path has decimation-based zoom (`apply_freq_zoom` + `compute_tile_db`). For small recordings the client-side FFT path (`use-spectrogram.tsx` + `use-get-image.tsx`) is used instead and freq zoom silently does nothing. Mirror the DSP on the client (shift + LPF + decimate) so zoom works for sub-10 M-sample files too.
 - [ ] **Horizontal scroll + freq-axis pan.** Today freq zoom re-centers on the freq-cursor box, but there's no way to pan left/right from there. Add a horizontal scrollbar + drag-to-pan inside the zoomed band.
 - [ ] **SSB audio quality.** Current `usb_receiver` / `lsb_receiver` do LPF + real-part SSB demod. Works for clean signals, noisy for marginal ones. Upgrade to a Weaver demodulator or a proper analytic-filter SSB.
