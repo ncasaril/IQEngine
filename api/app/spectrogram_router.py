@@ -1,15 +1,17 @@
 import json
 import logging
 import math
+import threading
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from helpers.datasource_access import check_access
 from helpers.samples import get_bytes_per_iq_sample, get_samples
 import asyncio
 
 from helpers.spectrogram_engine import (
+    TileCancelled,
     apply_freq_zoom,
     compute_spectrogram_db,
     compute_tile,
@@ -110,6 +112,7 @@ async def get_spectrogram_info(
 
 @router.get("/api/datasources/{account}/{container}/{filepath:path}/spectrogram/tile/{zoom}/{time_index}")
 async def get_spectrogram_tile(
+    request: Request,
     filepath: str,
     zoom: int,
     time_index: int,
@@ -189,6 +192,27 @@ async def get_spectrogram_tile(
 
     samples = await _read_samples_range(client, iq_file, data_type, sample_start, num_samples)
 
+    # Cooperative cancellation: a watchdog polls request.is_disconnected() every
+    # 250ms and sets a threading.Event. The CPU pipeline checks the event between
+    # FFT chunks (compute_spectrogram_db) and bails out via TileCancelled instead
+    # of burning the thread to completion for a client that's already gone.
+    cancel_event = threading.Event()
+
+    async def _watchdog() -> None:
+        try:
+            while not cancel_event.is_set():
+                await asyncio.sleep(0.25)
+                try:
+                    if await request.is_disconnected():
+                        cancel_event.set()
+                        return
+                except Exception:
+                    return
+        except asyncio.CancelledError:
+            return
+
+    watchdog_task = asyncio.create_task(_watchdog())
+
     # Offload the CPU-heavy pipeline (optional freq-zoom DSP, FFT, row averaging,
     # colormap+PNG) to a threadpool thread so many tile requests can run
     # concurrently instead of serializing on the asyncio event loop. numpy/scipy
@@ -217,6 +241,7 @@ async def get_spectrogram_tile(
                 window=window,
                 total_ffts=sub_total_ffts,
                 max_zoom=sub_max_zoom,
+                cancel=cancel_event.is_set,
             )
             return ("float32", db)
         png_bytes, tile_meta = compute_tile(
@@ -231,10 +256,24 @@ async def get_spectrogram_tile(
             mag_max=mag_max,
             total_ffts=sub_total_ffts,
             max_zoom=sub_max_zoom,
+            cancel=cancel_event.is_set,
         )
         return ("png", png_bytes, tile_meta)
 
-    result = await asyncio.to_thread(_compute_sync)
+    try:
+        result = await asyncio.to_thread(_compute_sync)
+    except TileCancelled:
+        logger.debug("Tile %s/%s cancelled (client disconnected)", zoom, time_index)
+        # Client has already gone — whatever we return won't be read. Use 499 so
+        # access logs make this visible.
+        raise HTTPException(status_code=499, detail="client disconnected")
+    finally:
+        cancel_event.set()
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except asyncio.CancelledError:
+            pass
 
     if result[0] == "float32":
         db = result[1]

@@ -1,13 +1,21 @@
 import io
 import math
 from functools import lru_cache
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 from PIL import Image
 from scipy import signal as scipy_signal
 
 from helpers.samples import get_bytes_per_iq_sample, get_samples
+
+
+class TileCancelled(Exception):
+    """Raised from inside the tile pipeline when the caller signals cancellation."""
+    pass
+
+
+CancelCheck = Optional[Callable[[], bool]]
 
 # Colormap LUTs — 256x3 uint8 arrays generated from matplotlib colormaps.
 # We store them here to avoid importing matplotlib at runtime (heavy + slow).
@@ -48,13 +56,21 @@ def _get_window(name: str, size: int) -> np.ndarray:
         return np.ones(size, dtype=np.float32)
 
 
-def compute_spectrogram_db(samples: np.ndarray, fft_size: int, window: str = "hanning") -> np.ndarray:
+def compute_spectrogram_db(
+    samples: np.ndarray,
+    fft_size: int,
+    window: str = "hanning",
+    cancel: CancelCheck = None,
+) -> np.ndarray:
     """Compute spectrogram as dB magnitude matrix using vectorized FFT.
 
     Args:
         samples: Complex64 numpy array of IQ samples
         fft_size: FFT size (must be power of 2)
         window: Window function name
+        cancel: Optional zero-arg callable — when it returns True, work is abandoned
+            and TileCancelled is raised. Called between row chunks so the client-
+            disconnect watchdog can bail out of long tiles.
 
     Returns:
         2D numpy float32 array of shape (num_rows, fft_size) in dB scale
@@ -69,19 +85,27 @@ def compute_spectrogram_db(samples: np.ndarray, fft_size: int, window: str = "ha
 
     # Apply window function (broadcast across rows)
     win = _get_window(window, fft_size)
-    windowed = truncated * win
 
-    # Vectorized FFT along axis=1, then fftshift
-    result = np.fft.fftshift(np.fft.fft(windowed, axis=1), axes=1)
+    # Process in row chunks so a watchdog can abort a long-running tile. At a
+    # 1024-pt FFT each chunk is ~40 ms of numpy work, which gives the caller a
+    # cancellation granularity well under a second without noticeable overhead.
+    CHUNK_ROWS = 4096
+    if num_rows <= CHUNK_ROWS:
+        if cancel is not None and cancel():
+            raise TileCancelled()
+        windowed = truncated * win
+        result = np.fft.fftshift(np.fft.fft(windowed, axis=1), axes=1) / fft_size
+        return (10.0 * np.log10(np.abs(result) + 1e-12)).astype(np.float32)
 
-    # Normalize by FFT size (matches client-side: out = out.map(x => x / fftSize))
-    result = result / fft_size
-
-    # Amplitude → dB: 10*log10(|X|) — matches client-side which does sqrt(re²+im²) then 10*log10
-    # (NOT power spectrum 10*log10(|X|²) which would be 20*log10(|X|))
-    magnitudes_db = 10.0 * np.log10(np.abs(result) + 1e-12)
-
-    return magnitudes_db.astype(np.float32)
+    out = np.empty((num_rows, fft_size), dtype=np.float32)
+    for start in range(0, num_rows, CHUNK_ROWS):
+        if cancel is not None and cancel():
+            raise TileCancelled()
+        end = min(start + CHUNK_ROWS, num_rows)
+        windowed = truncated[start:end] * win
+        result = np.fft.fftshift(np.fft.fft(windowed, axis=1), axes=1) / fft_size
+        out[start:end] = (10.0 * np.log10(np.abs(result) + 1e-12)).astype(np.float32)
+    return out
 
 
 def apply_colormap(magnitudes_db: np.ndarray, cmap: str = "viridis", mag_min: Optional[float] = None, mag_max: Optional[float] = None) -> np.ndarray:
@@ -219,6 +243,7 @@ def compute_tile_db(
     window: str = "hanning",
     total_ffts: Optional[int] = None,
     max_zoom: Optional[int] = None,
+    cancel: CancelCheck = None,
 ) -> np.ndarray:
     """Compute the zoom-averaged dB magnitude tile (no colormap, no PNG).
 
@@ -242,9 +267,12 @@ def compute_tile_db(
     sample_end = end_fft * fft_size
     tile_samples = samples[sample_start:sample_end]
 
-    db = compute_spectrogram_db(tile_samples, fft_size, window)
+    db = compute_spectrogram_db(tile_samples, fft_size, window, cancel=cancel)
     if db.shape[0] == 0:
         return db
+
+    if cancel is not None and cancel():
+        raise TileCancelled()
 
     if rows_per_tile_row > 1 and db.shape[0] > tile_height:
         num_output_rows = math.ceil(db.shape[0] / rows_per_tile_row)
@@ -269,11 +297,14 @@ def compute_tile(
     mag_max: Optional[float] = None,
     total_ffts: Optional[int] = None,
     max_zoom: Optional[int] = None,
+    cancel: CancelCheck = None,
 ) -> Tuple[bytes, dict]:
     """Compute a single spectrogram tile as PNG (colormap applied server-side)."""
-    db = compute_tile_db(samples, fft_size, zoom, time_index, tile_height, window, total_ffts, max_zoom)
+    db = compute_tile_db(samples, fft_size, zoom, time_index, tile_height, window, total_ffts, max_zoom, cancel=cancel)
     if db.shape[0] == 0:
         rgb = np.zeros((1, fft_size, 3), dtype=np.uint8)
         return rgb_to_png(rgb), {"rows": 0, "cols": fft_size}
+    if cancel is not None and cancel():
+        raise TileCancelled()
     rgb = apply_colormap(db, cmap=cmap, mag_min=mag_min, mag_max=mag_max)
     return rgb_to_png(rgb), {"rows": rgb.shape[0], "cols": rgb.shape[1]}
