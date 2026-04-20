@@ -21,8 +21,10 @@ const SettingsPane = ({ currentFFT }) => {
   const fftSizes = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
   const windowFunctions = ['hamming', 'rectangle', 'hanning', 'barlett', 'blackman'];
   const context = useSpectrogramContext();
-  const sampleRate = context.meta?.getSampleRate() || 0;
-  const coreFrequency = context.meta?.getCenterFrequency();
+  // Under freq zoom the displayed spectrum covers a narrower band, so cursor→Hz
+  // math should use the effective SR/center (falls back to raw meta when no zoom).
+  const sampleRate = context.effectiveSampleRateHz || context.meta?.getSampleRate() || 0;
+  const coreFrequency = context.effectiveCenterFreqHz || context.meta?.getCenterFrequency();
   const cursorContext = useCursorContext();
   const [localPythonSnippet, setLocalPythonSnippet] = useState(context.pythonSnippet);
   const [localTaps, setLocalTaps] = useState(JSON.stringify(context.taps));
@@ -165,8 +167,11 @@ const SettingsPane = ({ currentFFT }) => {
       <div className="mb-3 flex flex-col gap-1">
         <span className="label-text text-base">Frequency Zoom</span>
         {(() => {
-          const sr = context.meta?.getSampleRate?.() || 0;
-          const cf = context.meta?.getCenterFrequency?.() || 0;
+          // Under an existing freq zoom, the cursor-norm units are in the zoomed band's
+          // coordinates, so resolve to absolute Hz via effective SR/center rather than
+          // the file's raw SR. Zooming again nests correctly.
+          const sr = context.effectiveSampleRateHz || 0;
+          const cf = context.effectiveCenterFreqHz || 0;
           const cursor = cursorContext.cursorFreq;
           const spanNorm = Math.abs((cursor?.end || 0) - (cursor?.start || 0));
           const canZoom = cursorContext.cursorFreqEnabled && spanNorm > 0 && sr > 0;

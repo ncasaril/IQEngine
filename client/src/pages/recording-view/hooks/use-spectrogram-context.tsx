@@ -50,6 +50,12 @@ interface SpectrogramContextProperties {
   freqZoomCenterHz: number | null;
   freqZoomBandwidthHz: number | null;
   setFreqZoom: (params: { centerHz: number; bandwidthHz: number } | null) => void;
+  // Effective values after freq zoom: sample rate = file_sr / zoom_decimation,
+  // center = freqZoomCenterHz. Consumers (freq cursor labels, plugin target_freq,
+  // ruler-top, etc.) should use these instead of raw meta for cursor→Hz math so
+  // they agree with the displayed spectrum.
+  effectiveSampleRateHz: number;
+  effectiveCenterFreqHz: number;
 }
 
 export const SpectrogramContext = createContext<SpectrogramContextProperties>(null);
@@ -101,6 +107,17 @@ export function SpectrogramContextProvider({
       setFreqZoomBandwidthHz(params.bandwidthHz);
     }
   };
+  const fileSampleRate = meta?.getSampleRate?.() || 0;
+  const fileCenter = meta?.getCenterFrequency?.() || 0;
+  let effectiveSampleRateHz = fileSampleRate;
+  let effectiveCenterFreqHz = fileCenter;
+  if (freqZoomBandwidthHz && freqZoomCenterHz != null && fileSampleRate > 0 && freqZoomBandwidthHz < fileSampleRate) {
+    // Match the server's zoom_decimation_factor: next power-of-two ratio of SR to BW
+    const ratio = fileSampleRate / freqZoomBandwidthHz;
+    const decimation = Math.max(1, 2 ** Math.ceil(Math.log2(ratio)));
+    effectiveSampleRateHz = fileSampleRate / decimation;
+    effectiveCenterFreqHz = freqZoomCenterHz;
+  }
   const { clearIQData } = useDataCacheFunctions(type, account, container, filePath, fftSize);
 
   function setPythonSnippet(pythonParameterSnippet: string) {
@@ -166,6 +183,8 @@ export function SpectrogramContextProvider({
         freqZoomCenterHz,
         freqZoomBandwidthHz,
         setFreqZoom,
+        effectiveSampleRateHz,
+        effectiveCenterFreqHz,
       }}
     >
       {children}

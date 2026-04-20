@@ -5,13 +5,16 @@ import { useSpectrogramContext } from '../hooks/use-spectrogram-context';
 import { useCursorContext } from '../hooks/use-cursor-context';
 
 const FreqSelector = () => {
-  const { spectrogramWidth, spectrogramHeight, meta, includeRfFreq } = useSpectrogramContext();
+  const { spectrogramWidth, spectrogramHeight, includeRfFreq, effectiveSampleRateHz, effectiveCenterFreqHz } =
+    useSpectrogramContext();
   const { cursorFreq, setCursorFreq, cursorFreqEnabled } = useCursorContext();
   const [lowerText, setLowerText] = useState('');
   const [upperText, setUpperText] = useState('');
   const [diffText, setDiffText] = useState('');
-  const sampleRate = meta?.getSampleRate() || 0;
-  const coreFrequency = includeRfFreq ? meta.getCenterFrequency() : 0;
+  // Under freq zoom the displayed spectrum covers a narrower band, so Hz labels
+  // for the cursor must be computed against the effective sample rate / center.
+  const sampleRate = effectiveSampleRateHz;
+  const coreFrequency = includeRfFreq ? effectiveCenterFreqHz : 0;
 
   const lowerPosition = (cursorFreq.start + 0.5) * spectrogramWidth; // in pixels. this auto-updates
   const upperPosition = (cursorFreq.end + 0.5) * spectrogramWidth;
@@ -21,14 +24,14 @@ const FreqSelector = () => {
     setLowerText(formatted.freq + ' ' + formatted.unit);
     const diffFormatted = unitPrefixHz(Math.abs(((upperPosition - lowerPosition) / spectrogramWidth) * sampleRate));
     setDiffText('Δ ' + diffFormatted.freq + ' ' + diffFormatted.unit);
-  }, [lowerPosition, includeRfFreq]);
+  }, [lowerPosition, upperPosition, includeRfFreq, sampleRate, coreFrequency]);
 
   useEffect(() => {
     const formatted = unitPrefixHz((upperPosition / spectrogramWidth - 0.5) * sampleRate + coreFrequency);
     setUpperText(formatted.freq + ' ' + formatted.unit);
     const diffFormatted = unitPrefixHz(Math.abs(((upperPosition - lowerPosition) / spectrogramWidth) * sampleRate));
     setDiffText('Δ ' + diffFormatted.freq + ' ' + diffFormatted.unit);
-  }, [upperPosition, includeRfFreq]);
+  }, [upperPosition, lowerPosition, includeRfFreq, sampleRate, coreFrequency]);
 
   const handleDragMoveLower = (e) => {
     let newX = e.target.x();

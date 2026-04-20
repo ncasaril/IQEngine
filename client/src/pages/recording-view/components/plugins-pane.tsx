@@ -22,7 +22,7 @@ import { CLIENT_TYPE_API, DataType, JobOutput, MetadataFile, PluginBody } from '
 import { usePlugin } from '../hooks/usePlugin';
 
 export const PluginsPane = () => {
-  const { meta, account, type, container, spectrogramWidth, spectrogramHeight, fftSize, selectedAnnotation, setMeta } =
+  const { meta, account, type, container, spectrogramWidth, spectrogramHeight, fftSize, selectedAnnotation, setMeta, effectiveSampleRateHz } =
     useSpectrogramContext();
   const { cursorTimeEnabled, cursorTime, cursorData, cursorFreq, cursorFreqEnabled } = useCursorContext();
   const { data: plugins, isError } = useGetPlugins();
@@ -357,10 +357,11 @@ export const PluginsPane = () => {
   // Auto-populate plugin params from freq cursors.
   // target_freq = center of the freq cursor box in Hz (offset from center_freq).
   // if_bandwidth / audio_bandwidth = width of the box in Hz.
-  // Keys are only touched if the plugin actually exposes them.
+  // Under freq zoom, cursor-norm units are relative to the zoomed band, so scale
+  // by the effective (zoomed) sample rate — not the file's original SR.
   useEffect(() => {
     if (!pluginParameters || !cursorFreqEnabled) return;
-    const sampleRate = meta?.getSampleRate?.();
+    const sampleRate = effectiveSampleRateHz;
     if (!sampleRate) return;
     const centerNorm = (cursorFreq.start + cursorFreq.end) / 2;
     const widthNorm = Math.abs(cursorFreq.end - cursorFreq.start);
@@ -381,7 +382,7 @@ export const PluginsPane = () => {
       }
     }
     if (changed) setPluginParameters(next);
-  }, [cursorFreq, cursorFreqEnabled, pluginParameters, meta, setPluginParameters]);
+  }, [cursorFreq, cursorFreqEnabled, pluginParameters, effectiveSampleRateHz, setPluginParameters]);
 
   return (
     <div className="pluginForm" id="pluginFormId" onSubmit={handleSubmit}>

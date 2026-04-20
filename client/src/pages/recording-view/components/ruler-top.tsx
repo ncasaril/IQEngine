@@ -7,27 +7,13 @@ import { Layer, Rect, Text } from 'react-konva';
 import { useSpectrogramContext } from '../hooks/use-spectrogram-context';
 
 const RulerTop = () => {
-  const { meta, fftSize, spectrogramWidth, includeRfFreq, freqZoomCenterHz, freqZoomBandwidthHz } =
+  const { fftSize, spectrogramWidth, includeRfFreq, effectiveSampleRateHz, effectiveCenterFreqHz } =
     useSpectrogramContext();
   const spectrogramWidthScale = spectrogramWidth / fftSize;
   const [ticks, setTicks] = useState([]);
   const [labels, setLabels] = useState([]);
-  // Under freq-zoom, the displayed spectrum covers a narrower band: width = effective
-  // sample rate (snapped to the power-of-two decimation the server used), centered on
-  // freqZoomCenterHz. Snap BW to next power-of-two ratio to mirror the server's
-  // zoom_decimation_factor so ruler labels line up with the actual spectrum.
-  const fileSampleRate = meta.getSampleRate();
-  const fileCenter = meta.getCenterFrequency();
-  let effectiveSampleRate = fileSampleRate;
-  let effectiveCenter = fileCenter;
-  if (freqZoomBandwidthHz && freqZoomCenterHz != null && freqZoomBandwidthHz < fileSampleRate) {
-    const ratio = fileSampleRate / freqZoomBandwidthHz;
-    const decimation = Math.max(1, 2 ** Math.ceil(Math.log2(ratio)));
-    effectiveSampleRate = fileSampleRate / decimation;
-    effectiveCenter = freqZoomCenterHz;
-  }
-  const sampleRate = effectiveSampleRate;
-  const centerFrequency = effectiveCenter;
+  const sampleRate = effectiveSampleRateHz;
+  const centerFrequency = effectiveCenterFreqHz;
 
   useEffect(() => {
     const num_ticks = 16;
