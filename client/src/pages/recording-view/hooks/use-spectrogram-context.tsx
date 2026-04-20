@@ -56,8 +56,8 @@ export function SpectrogramContextProvider({
   container,
   filePath,
   seedValues = {
-    magnitudeMin: -30,
-    magnitudeMax: 5,
+    magnitudeMin: -80,
+    magnitudeMax: 0,
     colmap: COLORMAP_DEFAULT,
     windowFunction: 'rectangle',
     fftSize: 1024,
