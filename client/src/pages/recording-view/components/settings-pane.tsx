@@ -162,6 +162,46 @@ const SettingsPane = ({ currentFFT }) => {
         Download Selected Samples
       </button>
 
+      <div className="mb-3 flex flex-col gap-1">
+        <span className="label-text text-base">Frequency Zoom</span>
+        {(() => {
+          const sr = context.meta?.getSampleRate?.() || 0;
+          const cf = context.meta?.getCenterFrequency?.() || 0;
+          const cursor = cursorContext.cursorFreq;
+          const spanNorm = Math.abs((cursor?.end || 0) - (cursor?.start || 0));
+          const canZoom = cursorContext.cursorFreqEnabled && spanNorm > 0 && sr > 0;
+          const bwHz = spanNorm * sr;
+          const centerHz = cf + ((cursor.start + cursor.end) / 2) * sr;
+          const active = context.freqZoomBandwidthHz != null;
+          return (
+            <>
+              <button
+                className="btn btn-xs btn-primary"
+                disabled={!canZoom}
+                onClick={() => context.setFreqZoom({ centerHz, bandwidthHz: bwHz })}
+                title={canZoom ? `Zoom to ${(bwHz / 1e3).toFixed(1)} kHz around ${(centerHz / 1e6).toFixed(4)} MHz` : 'Enable freq cursors and drag a band first'}
+              >
+                Zoom to Freq Cursors
+              </button>
+              {active && (
+                <>
+                  <div className="text-xs opacity-70">
+                    zoomed: {((context.freqZoomBandwidthHz || 0) / 1e3).toFixed(1)} kHz @{' '}
+                    {((context.freqZoomCenterHz || 0) / 1e6).toFixed(4)} MHz
+                  </div>
+                  <button
+                    className="btn btn-xs btn-ghost"
+                    onClick={() => context.setFreqZoom(null)}
+                  >
+                    Reset Freq Zoom
+                  </button>
+                </>
+              )}
+            </>
+          );
+        })()}
+      </div>
+
       <div className="mb-3" id="formMagMax">
         <label>
           <span className="label-text text-base">Magnitude Color Mapping</span>

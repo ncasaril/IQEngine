@@ -44,6 +44,12 @@ interface SpectrogramContextProperties {
   setSelectedAnnotation: (selectedAnnotation: number) => void;
   serverSideFFT: boolean;
   setServerSideFFT: (serverSideFFT: boolean) => void;
+  // Freq-zoom state: when freqZoomBandwidthHz > 0, the spectrogram is rendered from
+  // IQ decimated by (originalSampleRate / nextPowerOfTwo(freqZoomBandwidthHz)) and
+  // mixed to put freqZoomCenterHz at DC. Null means no zoom (full span).
+  freqZoomCenterHz: number | null;
+  freqZoomBandwidthHz: number | null;
+  setFreqZoom: (params: { centerHz: number; bandwidthHz: number } | null) => void;
 }
 
 export const SpectrogramContext = createContext<SpectrogramContextProperties>(null);
@@ -84,6 +90,17 @@ export function SpectrogramContextProvider({
   const [canDownload, setCanDownload] = useState<boolean>(false);
   const [selectedAnnotation, setSelectedAnnotation] = useState<number>();
   const [serverSideFFT, setServerSideFFT] = useState<boolean>(false);
+  const [freqZoomCenterHz, setFreqZoomCenterHz] = useState<number | null>(null);
+  const [freqZoomBandwidthHz, setFreqZoomBandwidthHz] = useState<number | null>(null);
+  const setFreqZoom = (params: { centerHz: number; bandwidthHz: number } | null) => {
+    if (!params) {
+      setFreqZoomCenterHz(null);
+      setFreqZoomBandwidthHz(null);
+    } else {
+      setFreqZoomCenterHz(params.centerHz);
+      setFreqZoomBandwidthHz(params.bandwidthHz);
+    }
+  };
   const { clearIQData } = useDataCacheFunctions(type, account, container, filePath, fftSize);
 
   function setPythonSnippet(pythonParameterSnippet: string) {
@@ -146,6 +163,9 @@ export function SpectrogramContextProvider({
         setSelectedAnnotation,
         serverSideFFT,
         setServerSideFFT,
+        freqZoomCenterHz,
+        freqZoomBandwidthHz,
+        setFreqZoom,
       }}
     >
       {children}

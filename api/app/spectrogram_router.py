@@ -7,7 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from helpers.datasource_access import check_access
 from helpers.samples import get_bytes_per_iq_sample, get_samples
-from helpers.spectrogram_engine import compute_spectrogram_db, compute_tile, compute_tile_info
+from helpers.spectrogram_engine import (
+    apply_freq_zoom,
+    compute_spectrogram_db,
+    compute_tile,
+    compute_tile_info,
+    zoom_decimation_factor,
+)
 from helpers.urlmapping import ApiType, get_file_name
 
 from . import datasources
@@ -44,6 +50,7 @@ async def _read_samples_range(client: AzureBlobClient, filepath: str, data_type:
 async def get_spectrogram_info(
     filepath: str,
     fft_size: int = Query(1024, description="FFT size (power of 2)"),
+    freq_bandwidth_hz: Optional[float] = Query(None, description="Freq-zoom bandwidth in Hz; omit for full-span view"),
     datasource: DataSource = Depends(datasources.get),
     access_allowed=Depends(check_access),
 ):
@@ -73,18 +80,27 @@ async def get_spectrogram_info(
     bytes_per_sample = get_bytes_per_iq_sample(data_type)
     total_samples = file_length // bytes_per_sample
 
-    info = compute_tile_info(total_samples, fft_size)
-    info["data_type"] = data_type
-    info["file_length_bytes"] = file_length
-
-    # Add sample rate and center freq if available
+    sample_rate_hz = None
+    center_freq_hz = None
     try:
         captures = meta.get("captures", [])
         if captures:
-            info["center_freq_hz"] = captures[0].get("core:frequency", None)
-        info["sample_rate_hz"] = meta["global"].get("core:sample_rate", None)
+            center_freq_hz = captures[0].get("core:frequency", None)
+        sample_rate_hz = meta["global"].get("core:sample_rate", None)
     except Exception:
         pass
+
+    decimation = zoom_decimation_factor(sample_rate_hz or 1.0, freq_bandwidth_hz)
+    info = compute_tile_info(total_samples, fft_size, decimation=decimation)
+    info["data_type"] = data_type
+    info["file_length_bytes"] = file_length
+    info["original_sample_rate_hz"] = sample_rate_hz
+    info["original_center_freq_hz"] = center_freq_hz
+    # Report the effective sample rate under the current zoom so client rulers can
+    # compute the right bin_hz and pixel-to-frequency mapping.
+    info["sample_rate_hz"] = (sample_rate_hz / decimation) if sample_rate_hz else None
+    info["center_freq_hz"] = center_freq_hz
+    info["zoom_decimation"] = decimation
 
     return info
 
@@ -99,6 +115,8 @@ async def get_spectrogram_tile(
     cmap: str = Query("viridis", description="Colormap name"),
     mag_min: Optional[float] = Query(None, description="Min dB for colormap"),
     mag_max: Optional[float] = Query(None, description="Max dB for colormap"),
+    freq_center_hz: Optional[float] = Query(None, description="Absolute Hz to place at DC for freq zoom"),
+    freq_bandwidth_hz: Optional[float] = Query(None, description="Freq-zoom bandwidth in Hz; omit for full span"),
     format: str = Query("png", description="Output format: png or float32"),
     datasource: DataSource = Depends(datasources.get),
     access_allowed=Depends(check_access),
@@ -113,13 +131,22 @@ async def get_spectrogram_tile(
     iq_file = get_file_name(filepath, ApiType.IQDATA)
     meta_file = get_file_name(filepath, ApiType.METADATA)
 
-    # Read metadata for data type
+    # Read metadata for data type + tuning
     try:
         meta_bytes = await client.get_blob_content(filepath=meta_file)
         meta = json.loads(meta_bytes)
         data_type = meta["global"]["core:datatype"]
     except Exception:
         raise HTTPException(status_code=400, detail="Could not read metadata for data type")
+
+    file_sample_rate_hz = meta["global"].get("core:sample_rate")
+    file_center_freq_hz = None
+    try:
+        captures = meta.get("captures", [])
+        if captures:
+            file_center_freq_hz = captures[0].get("core:frequency")
+    except Exception:
+        pass
 
     bytes_per_sample = get_bytes_per_iq_sample(data_type)
 
@@ -130,7 +157,12 @@ async def get_spectrogram_tile(
 
     total_samples = file_length // bytes_per_sample
     tile_height = 256
-    total_ffts = total_samples // fft_size
+
+    # Freq zoom: decimate by power-of-two factor so one FFT row consumes
+    # `fft_size * decimation` original samples. Tile grid collapses accordingly.
+    decimation = zoom_decimation_factor(file_sample_rate_hz or 1.0, freq_bandwidth_hz)
+    effective_samples_per_row = fft_size * decimation
+    total_ffts = total_samples // effective_samples_per_row
 
     if total_ffts == 0:
         raise HTTPException(status_code=400, detail="Recording too small for requested FFT size")
@@ -147,12 +179,22 @@ async def get_spectrogram_tile(
     if start_fft >= total_ffts:
         raise HTTPException(status_code=404, detail="Tile index out of range")
 
-    # Read just the samples we need for this tile
-    sample_start = start_fft * fft_size
-    sample_end = end_fft * fft_size
-    num_samples = sample_end - sample_start
+    # Read the original-rate samples that will produce (end_fft - start_fft) rows
+    # at the decimated rate.
+    sample_start = start_fft * effective_samples_per_row
+    num_samples = (end_fft - start_fft) * effective_samples_per_row
 
     samples = await _read_samples_range(client, iq_file, data_type, sample_start, num_samples)
+
+    if decimation > 1 and file_sample_rate_hz and file_center_freq_hz is not None:
+        zoom_center = freq_center_hz if freq_center_hz is not None else file_center_freq_hz
+        samples = apply_freq_zoom(
+            samples,
+            orig_sample_rate_hz=file_sample_rate_hz,
+            file_center_hz=file_center_freq_hz,
+            zoom_center_hz=zoom_center,
+            decimation=decimation,
+        )
 
     if format == "float32":
         db_array = compute_spectrogram_db(samples, fft_size, window)

@@ -19,25 +19,50 @@ interface ServerSpectrogramResult {
 }
 
 export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResult {
-  const { account, container, filePath, fftSize, fftStepSize, spectrogramHeight, spectrogramWidth, colmap, windowFunction, magnitudeMin, magnitudeMax } =
-    useSpectrogramContext();
+  const {
+    account,
+    container,
+    filePath,
+    fftSize,
+    fftStepSize,
+    spectrogramHeight,
+    spectrogramWidth,
+    colmap,
+    windowFunction,
+    magnitudeMin,
+    magnitudeMax,
+    freqZoomCenterHz,
+    freqZoomBandwidthHz,
+  } = useSpectrogramContext();
+  const freqZoom =
+    freqZoomCenterHz != null && freqZoomBandwidthHz != null && freqZoomBandwidthHz > 0
+      ? { freqCenterHz: freqZoomCenterHz, freqBandwidthHz: freqZoomBandwidthHz }
+      : null;
 
   const [tileInfo, setTileInfo] = useState<TileInfo | null>(null);
+  const [tileInfoZoomKey, setTileInfoZoomKey] = useState<string>('full');
   const [image, setImage] = useState<ImageBitmap | null>(null);
   const [loading, setLoading] = useState(false);
   const tileCache = useRef<Map<string, TileResult>>(new Map());
   const abortRef = useRef<AbortController | null>(null);
+  const currentZoomKey = freqZoom ? `${freqZoom.freqCenterHz}:${freqZoom.freqBandwidthHz}` : 'full';
 
   // Fetch tile info when recording or FFT size changes
   useEffect(() => {
     if (!account || !container || !filePath) return;
 
     let cancelled = false;
-    fetchTileInfo(account, container, filePath, fftSize)
+    // Clear stale tile info before refetching — otherwise the tile-fetch effect will
+    // briefly request tiles at the OLD max_zoom (e.g. 7) against the NEW freq-zoom
+    // decimation (which may only have max_zoom=2) and server will 400.
+    setTileInfo(null);
+    tileCache.current.clear();
+    const fetchZoomKey = currentZoomKey;
+    fetchTileInfo(account, container, filePath, fftSize, freqZoom)
       .then((info) => {
         if (!cancelled) {
           setTileInfo(info);
-          tileCache.current.clear();
+          setTileInfoZoomKey(fetchZoomKey);
         }
       })
       .catch((err) => {
@@ -47,7 +72,7 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     return () => {
       cancelled = true;
     };
-  }, [account, container, filePath, fftSize]);
+  }, [account, container, filePath, fftSize, freqZoomCenterHz, freqZoomBandwidthHz]);
 
   // Pick the zoom level whose `rows_per_tile_row` matches the Zoom Out Level slider.
   // fftStepSize = N means each displayed row should aggregate N+1 source FFT rows.
@@ -73,6 +98,10 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
   // Fetch visible tiles and composite them
   useEffect(() => {
     if (!tileInfo || !account || !container || !filePath) return;
+    // Skip until the tileInfo matches the current zoom parameters. Otherwise a just-
+    // changed freq zoom would ask the server for a zoom level that only existed in
+    // the pre-zoom tile pyramid → 400.
+    if (tileInfoZoomKey !== currentZoomKey) return;
 
     const visibleIndices = getVisibleTiles(tileInfo, zoom, currentFFT, spectrogramHeight);
     if (visibleIndices.length === 0) return;
@@ -90,11 +119,13 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
       cmap: colmap,
       magMin: magnitudeMin,
       magMax: magnitudeMax,
+      ...(freqZoom ? { freqCenterHz: freqZoom.freqCenterHz, freqBandwidthHz: freqZoom.freqBandwidthHz } : {}),
     };
 
     // Check cache, fetch missing tiles
+    const zoomKey = freqZoom ? `${freqZoom.freqCenterHz}:${freqZoom.freqBandwidthHz}` : 'full';
     const promises = visibleIndices.map(async (tileIndex) => {
-      const cacheKey = `${zoom}/${tileIndex}/${colmap}/${magnitudeMin}/${magnitudeMax}/${windowFunction}`;
+      const cacheKey = `${zoom}/${tileIndex}/${colmap}/${magnitudeMin}/${magnitudeMax}/${windowFunction}/${zoomKey}`;
       const cached = tileCache.current.get(cacheKey);
       if (cached) return cached;
 
@@ -164,7 +195,7 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     return () => {
       controller.abort();
     };
-  }, [tileInfo, zoom, currentFFT, spectrogramHeight, spectrogramWidth, colmap, magnitudeMin, magnitudeMax, windowFunction, fftSize, fftStepSize, account, container, filePath]);
+  }, [tileInfo, tileInfoZoomKey, currentZoomKey, zoom, currentFFT, spectrogramHeight, spectrogramWidth, colmap, magnitudeMin, magnitudeMax, windowFunction, fftSize, fftStepSize, freqZoomCenterHz, freqZoomBandwidthHz, account, container, filePath]);
 
   return {
     image,

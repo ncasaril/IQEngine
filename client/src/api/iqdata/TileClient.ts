@@ -12,6 +12,9 @@ export interface TileInfo {
   data_type: string;
   sample_rate_hz?: number;
   center_freq_hz?: number;
+  original_sample_rate_hz?: number;
+  original_center_freq_hz?: number;
+  zoom_decimation?: number;
   zoom_levels: Record<
     number,
     {
@@ -20,6 +23,11 @@ export interface TileInfo {
       effective_ffts: number;
     }
   >;
+}
+
+export interface FreqZoomParams {
+  freqCenterHz: number;
+  freqBandwidthHz: number;
 }
 
 export interface TileResult {
@@ -37,9 +45,12 @@ export async function fetchTileInfo(
   account: string,
   container: string,
   filePath: string,
-  fftSize: number = 1024
+  fftSize: number = 1024,
+  freqZoom: FreqZoomParams | null = null
 ): Promise<TileInfo> {
-  const url = `/api/datasources/${account}/${container}/${filePath}/spectrogram/info?fft_size=${fftSize}`;
+  const params = new URLSearchParams({ fft_size: String(fftSize) });
+  if (freqZoom) params.set('freq_bandwidth_hz', String(freqZoom.freqBandwidthHz));
+  const url = `/api/datasources/${account}/${container}/${filePath}/spectrogram/info?${params.toString()}`;
   const resp = await fetch(url);
   if (!resp.ok) {
     throw new Error(`Failed to fetch tile info: ${resp.status} ${resp.statusText}`);
@@ -62,6 +73,8 @@ export async function fetchTile(
     cmap?: string;
     magMin?: number;
     magMax?: number;
+    freqCenterHz?: number;
+    freqBandwidthHz?: number;
   } = {}
 ): Promise<TileResult> {
   const params = new URLSearchParams();
@@ -70,6 +83,10 @@ export async function fetchTile(
   if (options.cmap) params.set('cmap', options.cmap);
   if (options.magMin !== undefined) params.set('mag_min', String(options.magMin));
   if (options.magMax !== undefined) params.set('mag_max', String(options.magMax));
+  if (options.freqCenterHz !== undefined && options.freqBandwidthHz !== undefined) {
+    params.set('freq_center_hz', String(options.freqCenterHz));
+    params.set('freq_bandwidth_hz', String(options.freqBandwidthHz));
+  }
 
   const url = `/api/datasources/${account}/${container}/${filePath}/spectrogram/tile/${zoom}/${timeIndex}?${params.toString()}`;
   const resp = await fetch(url);

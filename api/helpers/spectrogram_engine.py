@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 from PIL import Image
+from scipy import signal as scipy_signal
 
 from helpers.samples import get_bytes_per_iq_sample, get_samples
 
@@ -125,7 +126,52 @@ def rgb_to_png(rgb: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def compute_tile_info(total_samples: int, fft_size: int, tile_height: int = 256) -> dict:
+def zoom_decimation_factor(orig_sample_rate_hz: float, zoom_bandwidth_hz: Optional[float]) -> int:
+    """Integer decimation factor D for the requested zoom bandwidth (>= 1, power of 2 ceiling)."""
+    if not zoom_bandwidth_hz or zoom_bandwidth_hz <= 0:
+        return 1
+    if zoom_bandwidth_hz >= orig_sample_rate_hz:
+        return 1
+    # Snap to next power of two so the tile pyramid stays in the same family
+    ratio = orig_sample_rate_hz / zoom_bandwidth_hz
+    return max(1, 2 ** int(math.ceil(math.log2(ratio))))
+
+
+def apply_freq_zoom(
+    samples: np.ndarray,
+    orig_sample_rate_hz: float,
+    file_center_hz: float,
+    zoom_center_hz: float,
+    decimation: int,
+) -> np.ndarray:
+    """Shift to baseband at zoom_center, low-pass, and decimate by `decimation`.
+
+    Returns complex64 samples at the decimated rate. No-op when decimation == 1.
+    """
+    if decimation <= 1:
+        return samples.astype(np.complex64, copy=False)
+    offset_hz = zoom_center_hz - file_center_hz
+    n = samples.size
+    if offset_hz != 0:
+        phase = -2.0 * math.pi * offset_hz * np.arange(n, dtype=np.float64) / orig_sample_rate_hz
+        mixer = np.exp(1j * phase).astype(np.complex64)
+        samples = (samples * mixer).astype(np.complex64, copy=False)
+    # LPF cutoff just under Nyquist of the decimated rate, applied as a FIR so
+    # we can convolve over complex input (scipy.signal.decimate rejects complex).
+    cutoff = 0.5 * orig_sample_rate_hz / decimation * 0.9
+    taps = scipy_signal.firwin(numtaps=129, cutoff=cutoff, fs=orig_sample_rate_hz).astype(np.float32)
+    filtered_i = np.convolve(samples.real, taps, mode="same")
+    filtered_q = np.convolve(samples.imag, taps, mode="same")
+    decimated = (filtered_i[::decimation] + 1j * filtered_q[::decimation]).astype(np.complex64)
+    return decimated
+
+
+def compute_tile_info(
+    total_samples: int,
+    fft_size: int,
+    tile_height: int = 256,
+    decimation: int = 1,
+) -> dict:
     """Compute tile grid metadata for a recording.
 
     Args:
@@ -136,7 +182,11 @@ def compute_tile_info(total_samples: int, fft_size: int, tile_height: int = 256)
     Returns:
         Dict with tile grid info
     """
-    total_ffts = total_samples // fft_size
+    # With freq zoom active, one FFT row consumes `fft_size * decimation` of the
+    # original samples (decimate by D, then take fft_size samples), so total rows
+    # collapse by the same factor.
+    effective_samples_per_row = fft_size * max(1, int(decimation))
+    total_ffts = total_samples // effective_samples_per_row
     if total_ffts == 0:
         return {"total_ffts": 0, "max_zoom": 0, "tile_height": tile_height, "fft_size": fft_size, "zoom_levels": {}}
 
