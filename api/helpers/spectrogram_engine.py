@@ -210,6 +210,53 @@ def compute_tile_info(
     }
 
 
+def compute_tile_db(
+    samples: np.ndarray,
+    fft_size: int,
+    zoom: int,
+    time_index: int,
+    tile_height: int = 256,
+    window: str = "hanning",
+    total_ffts: Optional[int] = None,
+    max_zoom: Optional[int] = None,
+) -> np.ndarray:
+    """Compute the zoom-averaged dB magnitude tile (no colormap, no PNG).
+
+    Returns a 2D float32 array of shape (num_output_rows, fft_size).
+    Shared hot path between the PNG tile endpoint and the float32 tile endpoint.
+    """
+    num_samples = len(samples)
+    if total_ffts is None:
+        total_ffts = num_samples // fft_size
+    if max_zoom is None:
+        max_zoom = max(0, math.ceil(math.log2(max(total_ffts / tile_height, 1))))
+
+    rows_per_tile_row = 2 ** (max_zoom - zoom)
+
+    start_fft = time_index * tile_height * rows_per_tile_row
+    end_fft = min(start_fft + tile_height * rows_per_tile_row, total_ffts)
+    if start_fft >= total_ffts:
+        return np.zeros((0, fft_size), dtype=np.float32)
+
+    sample_start = start_fft * fft_size
+    sample_end = end_fft * fft_size
+    tile_samples = samples[sample_start:sample_end]
+
+    db = compute_spectrogram_db(tile_samples, fft_size, window)
+    if db.shape[0] == 0:
+        return db
+
+    if rows_per_tile_row > 1 and db.shape[0] > tile_height:
+        num_output_rows = math.ceil(db.shape[0] / rows_per_tile_row)
+        padded_rows = num_output_rows * rows_per_tile_row
+        if padded_rows > db.shape[0]:
+            pad = np.full((padded_rows - db.shape[0], fft_size), np.nan, dtype=np.float32)
+            db = np.concatenate([db, pad], axis=0)
+        db = np.nanmean(db.reshape(num_output_rows, rows_per_tile_row, fft_size), axis=1)
+
+    return db.astype(np.float32, copy=False)
+
+
 def compute_tile(
     samples: np.ndarray,
     fft_size: int,
@@ -223,65 +270,10 @@ def compute_tile(
     total_ffts: Optional[int] = None,
     max_zoom: Optional[int] = None,
 ) -> Tuple[bytes, dict]:
-    """Compute a single spectrogram tile as PNG.
-
-    Args:
-        samples: Full IQ samples array (complex64) — or the relevant slice
-        fft_size: FFT size
-        zoom: Zoom level (0 = most zoomed out, max_zoom = 1:1)
-        time_index: Tile index along time axis at this zoom level
-        tile_height: Rows per tile at max zoom
-        window: Window function name
-        cmap: Colormap name
-        mag_min: Min dB for colormap (auto if None)
-        mag_max: Max dB for colormap (auto if None)
-        total_ffts: Precomputed total FFTs (avoids recomputing)
-        max_zoom: Precomputed max zoom (avoids recomputing)
-
-    Returns:
-        Tuple of (PNG bytes, metadata dict with actual dimensions)
-    """
-    num_samples = len(samples)
-    if total_ffts is None:
-        total_ffts = num_samples // fft_size
-    if max_zoom is None:
-        max_zoom = max(0, math.ceil(math.log2(max(total_ffts / tile_height, 1))))
-
-    rows_per_tile_row = 2 ** (max_zoom - zoom)
-
-    # Which raw FFT rows does this tile cover?
-    start_fft = time_index * tile_height * rows_per_tile_row
-    end_fft = min(start_fft + tile_height * rows_per_tile_row, total_ffts)
-
-    if start_fft >= total_ffts:
-        # Empty tile
-        rgb = np.zeros((1, fft_size, 3), dtype=np.uint8)
-        return rgb_to_png(rgb), {"rows": 0, "cols": fft_size}
-
-    # Extract the relevant samples
-    sample_start = start_fft * fft_size
-    sample_end = end_fft * fft_size
-    tile_samples = samples[sample_start:sample_end]
-
-    # Compute full-resolution dB spectrogram for this tile's range
-    db = compute_spectrogram_db(tile_samples, fft_size, window)
-
+    """Compute a single spectrogram tile as PNG (colormap applied server-side)."""
+    db = compute_tile_db(samples, fft_size, zoom, time_index, tile_height, window, total_ffts, max_zoom)
     if db.shape[0] == 0:
         rgb = np.zeros((1, fft_size, 3), dtype=np.uint8)
         return rgb_to_png(rgb), {"rows": 0, "cols": fft_size}
-
-    # Zoom-out: average groups of rows (preserves energy, no aliasing)
-    if rows_per_tile_row > 1 and db.shape[0] > tile_height:
-        num_output_rows = math.ceil(db.shape[0] / rows_per_tile_row)
-        # Pad to exact multiple if needed
-        padded_rows = num_output_rows * rows_per_tile_row
-        if padded_rows > db.shape[0]:
-            pad = np.full((padded_rows - db.shape[0], fft_size), np.nan, dtype=np.float32)
-            db = np.concatenate([db, pad], axis=0)
-        db = np.nanmean(db.reshape(num_output_rows, rows_per_tile_row, fft_size), axis=1)
-
-    # Apply colormap
     rgb = apply_colormap(db, cmap=cmap, mag_min=mag_min, mag_max=mag_max)
-
-    png_bytes = rgb_to_png(rgb)
-    return png_bytes, {"rows": rgb.shape[0], "cols": rgb.shape[1]}
+    return rgb_to_png(rgb), {"rows": rgb.shape[0], "cols": rgb.shape[1]}

@@ -1,20 +1,22 @@
 /**
  * Hook for server-side spectrogram tile fetching and compositing.
  * Parallel rendering path — does not affect client-side FFT.
+ *
+ * Tiles are fetched as raw-dB float32 from the server and the colormap + magnitude
+ * scaling is applied in the browser. This decouples the tile cache from the
+ * colormap / dB slider / magnitude settings: changing them is a free re-composite
+ * from cached dB arrays, no network.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchTile, fetchTileInfo, getVisibleTiles, TileInfo, TileResult } from '@/api/iqdata/TileClient';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { fetchTileDb, fetchTileInfo, getVisibleTiles, TileDbResult, TileInfo } from '@/api/iqdata/TileClient';
+import { dbTileToImageData } from '@/pages/recording-view/utils/db-tile-render';
 import { useSpectrogramContext } from './use-spectrogram-context';
 
 interface ServerSpectrogramResult {
-  /** Composited ImageBitmap for the current viewport, or null if loading */
   image: ImageBitmap | null;
-  /** Whether tile info has been loaded */
   ready: boolean;
-  /** Whether tiles are currently being fetched */
   loading: boolean;
-  /** Tile grid metadata */
   tileInfo: TileInfo | null;
 }
 
@@ -43,18 +45,13 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
   const [tileInfoZoomKey, setTileInfoZoomKey] = useState<string>('full');
   const [image, setImage] = useState<ImageBitmap | null>(null);
   const [loading, setLoading] = useState(false);
-  const tileCache = useRef<Map<string, TileResult>>(new Map());
+  const tileCache = useRef<Map<string, TileDbResult>>(new Map());
   const abortRef = useRef<AbortController | null>(null);
   const currentZoomKey = freqZoom ? `${freqZoom.freqCenterHz}:${freqZoom.freqBandwidthHz}` : 'full';
 
-  // Fetch tile info when recording or FFT size changes
   useEffect(() => {
     if (!account || !container || !filePath) return;
-
     let cancelled = false;
-    // Clear stale tile info before refetching — otherwise the tile-fetch effect will
-    // briefly request tiles at the OLD max_zoom (e.g. 7) against the NEW freq-zoom
-    // decimation (which may only have max_zoom=2) and server will 400.
     setTileInfo(null);
     tileCache.current.clear();
     const fetchZoomKey = currentZoomKey;
@@ -68,17 +65,11 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
       .catch((err) => {
         if (!cancelled) console.error('Failed to fetch tile info:', err);
       });
-
     return () => {
       cancelled = true;
     };
   }, [account, container, filePath, fftSize, freqZoomCenterHz, freqZoomBandwidthHz]);
 
-  // Pick the zoom level whose `rows_per_tile_row` matches the Zoom Out Level slider.
-  // fftStepSize = N means each displayed row should aggregate N+1 source FFT rows.
-  // Choose the most-zoomed-out level whose rows_per_tile_row still fits within `desired`
-  // (i.e. the largest rpr that is ≤ desired) so we don't over-aggregate.
-  // At fftStepSize=0 → desired=1 → picks max_zoom (1:1).
   const zoom = useMemo(() => {
     if (!tileInfo) return 0;
     const desired = fftStepSize + 1;
@@ -95,30 +86,21 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     return pick;
   }, [tileInfo, fftStepSize]);
 
-  // Fetch visible tiles and composite them
   useEffect(() => {
     if (!tileInfo || !account || !container || !filePath) return;
-    // Skip until the tileInfo matches the current zoom parameters. Otherwise a just-
-    // changed freq zoom would ask the server for a zoom level that only existed in
-    // the pre-zoom tile pyramid → 400.
     if (tileInfoZoomKey !== currentZoomKey) return;
 
     const visibleIndices = getVisibleTiles(tileInfo, zoom, currentFFT, spectrogramHeight);
     if (visibleIndices.length === 0) return;
 
-    // Cancel previous fetch batch
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
-
     setLoading(true);
 
     const fetchOptions = {
       fftSize,
       window: windowFunction,
-      cmap: colmap,
-      magMin: magnitudeMin,
-      magMax: magnitudeMax,
       signal: controller.signal,
       ...(freqZoom ? { freqCenterHz: freqZoom.freqCenterHz, freqBandwidthHz: freqZoom.freqBandwidthHz } : {}),
     };
@@ -128,9 +110,6 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     const rowsPerTileRow = zoomLevel?.rows_per_tile_row ?? 1;
     const tileHeightRows = tileInfo.tile_height;
 
-    // Incremental composition: blit each tile onto the composite canvas as it
-    // resolves (from cache or network) and refresh the <Image> bitmap, rAF-
-    // throttled. One slow tile no longer blocks the whole viewport from showing.
     const canvas = new OffscreenCanvas(spectrogramWidth, spectrogramHeight);
     const ctx = canvas.getContext('2d');
     if (!ctx) {
@@ -156,14 +135,24 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
       });
     };
 
-    const paintTile = (tile: TileResult) => {
+    // Render a dB tile with the CURRENT colormap + magnitude slider values, then
+    // blit onto the composite canvas at the right Y. Colormap / mag aren't part of
+    // the cache key, so slider changes just re-run this pass on cached tiles.
+    const paintTile = (tile: TileDbResult) => {
+      if (tile.rows === 0 || tile.cols === 0) return;
+      const imgData = dbTileToImageData(tile.db, tile.rows, tile.cols, magnitudeMin, magnitudeMax, colmap);
+      // Put onto a scratch canvas so we can draw-scale it to spectrogramWidth.
+      const scratch = new OffscreenCanvas(tile.cols, tile.rows);
+      const sctx = scratch.getContext('2d');
+      if (!sctx) return;
+      sctx.putImageData(imgData, 0, 0);
       const tileStartFFT = tile.timeIndex * tileHeightRows * rowsPerTileRow;
       const yOffset = (tileStartFFT - currentFFT) / rowsPerTileRow;
-      ctx.drawImage(tile.image, 0, yOffset, spectrogramWidth, tile.rows);
+      ctx.drawImage(scratch, 0, yOffset, spectrogramWidth, tile.rows);
     };
 
     const perTile = visibleIndices.map(async (tileIndex) => {
-      const cacheKey = `${zoom}/${tileIndex}/${colmap}/${magnitudeMin}/${magnitudeMax}/${windowFunction}/${zoomKey}`;
+      const cacheKey = `${zoom}/${tileIndex}/${windowFunction}/${zoomKey}`;
       const cached = tileCache.current.get(cacheKey);
       if (cached) {
         if (controller.signal.aborted) return;
@@ -171,9 +160,8 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
         scheduleRefresh();
         return;
       }
-
       try {
-        const result = await fetchTile(account, container, filePath, zoom, tileIndex, fetchOptions);
+        const result = await fetchTileDb(account, container, filePath, zoom, tileIndex, fetchOptions);
         if (controller.signal.aborted) return;
         tileCache.current.set(cacheKey, result);
         if (tileCache.current.size > 200) {
@@ -183,7 +171,6 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
         paintTile(result);
         scheduleRefresh();
       } catch (err: any) {
-        // AbortError during a scroll is expected — don't log.
         if (!controller.signal.aborted && err?.name !== 'AbortError') {
           console.error(`Failed to fetch tile ${zoom}/${tileIndex}:`, err);
         }
@@ -197,7 +184,26 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     return () => {
       controller.abort();
     };
-  }, [tileInfo, tileInfoZoomKey, currentZoomKey, zoom, currentFFT, spectrogramHeight, spectrogramWidth, colmap, magnitudeMin, magnitudeMax, windowFunction, fftSize, fftStepSize, freqZoomCenterHz, freqZoomBandwidthHz, account, container, filePath]);
+  }, [
+    tileInfo,
+    tileInfoZoomKey,
+    currentZoomKey,
+    zoom,
+    currentFFT,
+    spectrogramHeight,
+    spectrogramWidth,
+    colmap,
+    magnitudeMin,
+    magnitudeMax,
+    windowFunction,
+    fftSize,
+    fftStepSize,
+    freqZoomCenterHz,
+    freqZoomBandwidthHz,
+    account,
+    container,
+    filePath,
+  ]);
 
   return {
     image,

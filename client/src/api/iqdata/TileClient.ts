@@ -38,6 +38,14 @@ export interface TileResult {
   cols: number;
 }
 
+export interface TileDbResult {
+  db: Float32Array;
+  zoom: number;
+  timeIndex: number;
+  rows: number;
+  cols: number;
+}
+
 /**
  * Fetch tile grid metadata for a recording.
  */
@@ -102,6 +110,45 @@ export async function fetchTile(
   const image = await createImageBitmap(blob);
 
   return { image, zoom, timeIndex, rows, cols };
+}
+
+/**
+ * Fetch a raw-dB tile (float32 magnitudes). Colormap + mag scaling are applied
+ * client-side so that changing magnitude/colormap doesn't invalidate the cache.
+ */
+export async function fetchTileDb(
+  account: string,
+  container: string,
+  filePath: string,
+  zoom: number,
+  timeIndex: number,
+  options: {
+    fftSize?: number;
+    window?: string;
+    freqCenterHz?: number;
+    freqBandwidthHz?: number;
+    signal?: AbortSignal;
+  } = {}
+): Promise<TileDbResult> {
+  const params = new URLSearchParams({ format: 'float32' });
+  if (options.fftSize) params.set('fft_size', String(options.fftSize));
+  if (options.window) params.set('window', options.window);
+  if (options.freqCenterHz !== undefined && options.freqBandwidthHz !== undefined) {
+    params.set('freq_center_hz', String(options.freqCenterHz));
+    params.set('freq_bandwidth_hz', String(options.freqBandwidthHz));
+  }
+
+  const url = `/api/datasources/${account}/${container}/${filePath}/spectrogram/tile/${zoom}/${timeIndex}?${params.toString()}`;
+  const resp = await fetch(url, { signal: options.signal });
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch tile ${zoom}/${timeIndex}: ${resp.status}`);
+  }
+
+  const rows = parseInt(resp.headers.get('X-Tile-Rows') || '0', 10);
+  const cols = parseInt(resp.headers.get('X-Tile-Cols') || '0', 10);
+  const buf = await resp.arrayBuffer();
+  const db = new Float32Array(buf);
+  return { db, zoom, timeIndex, rows, cols };
 }
 
 /**

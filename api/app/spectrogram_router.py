@@ -7,10 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from helpers.datasource_access import check_access
 from helpers.samples import get_bytes_per_iq_sample, get_samples
+import asyncio
+
 from helpers.spectrogram_engine import (
     apply_freq_zoom,
     compute_spectrogram_db,
     compute_tile,
+    compute_tile_db,
     compute_tile_info,
     zoom_decimation_factor,
 )
@@ -186,38 +189,67 @@ async def get_spectrogram_tile(
 
     samples = await _read_samples_range(client, iq_file, data_type, sample_start, num_samples)
 
-    if decimation > 1 and file_sample_rate_hz and file_center_freq_hz is not None:
-        zoom_center = freq_center_hz if freq_center_hz is not None else file_center_freq_hz
-        samples = apply_freq_zoom(
-            samples,
-            orig_sample_rate_hz=file_sample_rate_hz,
-            file_center_hz=file_center_freq_hz,
-            zoom_center_hz=zoom_center,
-            decimation=decimation,
+    # Offload the CPU-heavy pipeline (optional freq-zoom DSP, FFT, row averaging,
+    # colormap+PNG) to a threadpool thread so many tile requests can run
+    # concurrently instead of serializing on the asyncio event loop. numpy/scipy
+    # release the GIL during FFT and convolve, so BLAS can fan each tile out
+    # across cores in parallel.
+    def _compute_sync():
+        s = samples
+        if decimation > 1 and file_sample_rate_hz and file_center_freq_hz is not None:
+            zoom_center = freq_center_hz if freq_center_hz is not None else file_center_freq_hz
+            s = apply_freq_zoom(
+                s,
+                orig_sample_rate_hz=file_sample_rate_hz,
+                file_center_hz=file_center_freq_hz,
+                zoom_center_hz=zoom_center,
+                decimation=decimation,
+            )
+        sub_total_ffts = end_fft - start_fft
+        sub_max_zoom = max(0, math.ceil(math.log2(max(sub_total_ffts / tile_height, 1))))
+        if format == "float32":
+            db = compute_tile_db(
+                s,
+                fft_size=fft_size,
+                zoom=0,
+                time_index=0,
+                tile_height=tile_height,
+                window=window,
+                total_ffts=sub_total_ffts,
+                max_zoom=sub_max_zoom,
+            )
+            return ("float32", db)
+        png_bytes, tile_meta = compute_tile(
+            s,
+            fft_size=fft_size,
+            zoom=0,
+            time_index=0,
+            tile_height=tile_height,
+            window=window,
+            cmap=cmap,
+            mag_min=mag_min,
+            mag_max=mag_max,
+            total_ffts=sub_total_ffts,
+            max_zoom=sub_max_zoom,
+        )
+        return ("png", png_bytes, tile_meta)
+
+    result = await asyncio.to_thread(_compute_sync)
+
+    if result[0] == "float32":
+        db = result[1]
+        return Response(
+            content=db.tobytes(),
+            media_type="application/octet-stream",
+            headers={
+                "X-Tile-Rows": str(db.shape[0]),
+                "X-Tile-Cols": str(db.shape[1]),
+                "X-Tile-Dtype": "float32",
+                "Cache-Control": "public, max-age=31536000, immutable",
+            },
         )
 
-    if format == "float32":
-        db_array = compute_spectrogram_db(samples, fft_size, window)
-        return Response(content=db_array.tobytes(), media_type="application/octet-stream", headers={"X-Rows": str(db_array.shape[0]), "X-Cols": str(db_array.shape[1])})
-
-    # We already sliced to this tile's sample range. Compute the sub-tile
-    # with the correct zoom relative to the sliced data.
-    sub_total_ffts = end_fft - start_fft
-    sub_max_zoom = max(0, math.ceil(math.log2(max(sub_total_ffts / tile_height, 1))))
-    png_bytes, tile_meta = compute_tile(
-        samples,
-        fft_size=fft_size,
-        zoom=0,
-        time_index=0,
-        tile_height=tile_height,
-        window=window,
-        cmap=cmap,
-        mag_min=mag_min,
-        mag_max=mag_max,
-        total_ffts=sub_total_ffts,
-        max_zoom=sub_max_zoom,
-    )
-
+    _, png_bytes, tile_meta = result
     return Response(
         content=png_bytes,
         media_type="image/png",
