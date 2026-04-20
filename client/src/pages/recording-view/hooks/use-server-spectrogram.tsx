@@ -21,6 +21,7 @@ import { useSpectrogramContext } from './use-spectrogram-context';
 
 const BUFFER_MULTIPLIER = 3;
 const TRIGGER_MARGIN_RATIO = 0.33;
+const BITMAP_CACHE_MAX = 80;
 
 interface ServerSpectrogramResult {
   image: ImageBitmap | null;
@@ -74,6 +75,11 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
   const [imageOffsetY, setImageOffsetY] = useState<number>(0);
   const [loading, setLoading] = useState(false);
   const tileCache = useRef<Map<string, TileDbResult>>(new Map());
+  // Rendered-bitmap cache, keyed by {tileKey | colmap | magMin | magMax}. Lets
+  // full repaints (buffer recenter, tile arrival) skip dbTileToImageData and
+  // putImageData for tiles the user has already seen at the current colour
+  // settings, so the repaint cost is just N × drawImage.
+  const bitmapCache = useRef<Map<string, ImageBitmap>>(new Map());
   const abortRef = useRef<AbortController | null>(null);
   const paintedRef = useRef<PaintState | null>(null);
   const currentZoomKey = freqZoom ? `${freqZoom.freqCenterHz}:${freqZoom.freqBandwidthHz}` : 'full';
@@ -83,6 +89,8 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     let cancelled = false;
     setTileInfo(null);
     tileCache.current.clear();
+    for (const bmp of bitmapCache.current.values()) bmp.close();
+    bitmapCache.current.clear();
     paintedRef.current = null;
     const fetchZoomKey = currentZoomKey;
     fetchTileInfo(account, container, filePath, fftSize, freqZoom)
@@ -188,6 +196,33 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
 
     const composedTiles: Map<number, TileDbResult> = new Map();
 
+    const getTileBitmap = (tile: TileDbResult, cacheKey: string): ImageBitmap | null => {
+      if (tile.rows === 0 || tile.cols === 0) return null;
+      const bKey = `${cacheKey}|${colmap}|${magnitudeMin}|${magnitudeMax}`;
+      const hit = bitmapCache.current.get(bKey);
+      if (hit) {
+        // Re-insert so the LRU order reflects recent use.
+        bitmapCache.current.delete(bKey);
+        bitmapCache.current.set(bKey, hit);
+        return hit;
+      }
+      const imgData = dbTileToImageData(tile.db, tile.rows, tile.cols, magnitudeMin, magnitudeMax, colmap);
+      const scratch = new OffscreenCanvas(tile.cols, tile.rows);
+      const sctx = scratch.getContext('2d');
+      if (!sctx) return null;
+      sctx.putImageData(imgData, 0, 0);
+      const bmp = scratch.transferToImageBitmap();
+      bitmapCache.current.set(bKey, bmp);
+      while (bitmapCache.current.size > BITMAP_CACHE_MAX) {
+        const firstKey = bitmapCache.current.keys().next().value;
+        if (firstKey === undefined) break;
+        const evicted = bitmapCache.current.get(firstKey);
+        bitmapCache.current.delete(firstKey);
+        if (evicted) evicted.close();
+      }
+      return bmp;
+    };
+
     let refreshPending = false;
     const commit = () => {
       if (refreshPending || controller.signal.aborted) return;
@@ -200,16 +235,13 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
         if (!ctx) return;
         ctx.fillStyle = 'black';
         ctx.fillRect(0, 0, spectrogramWidth, bufferHeightPx);
-        for (const tile of composedTiles.values()) {
-          if (tile.rows === 0 || tile.cols === 0) continue;
-          const imgData = dbTileToImageData(tile.db, tile.rows, tile.cols, magnitudeMin, magnitudeMax, colmap);
-          const scratch = new OffscreenCanvas(tile.cols, tile.rows);
-          const sctx = scratch.getContext('2d');
-          if (!sctx) continue;
-          sctx.putImageData(imgData, 0, 0);
+        for (const [tileIndex, tile] of composedTiles.entries()) {
+          const tileKey = `${zoom}/${tileIndex}/${windowFunction}/${zoomKey}`;
+          const bmp = getTileBitmap(tile, tileKey);
+          if (!bmp) continue;
           const tileStartFFT = tile.timeIndex * tileHeightRows * rowsPerTileRow;
           const yOffset = ((tileStartFFT - anchorFFT) / rowsPerTileRow) * timeZoomIn;
-          ctx.drawImage(scratch, 0, yOffset, spectrogramWidth, tile.rows * timeZoomIn);
+          ctx.drawImage(bmp, 0, yOffset, spectrogramWidth, tile.rows * timeZoomIn);
         }
         const bmp = canvas.transferToImageBitmap();
         if (!controller.signal.aborted) {
