@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 
 export const LAST_RECORDING_STORAGE_KEY = 'iqengine:lastRecordingPath';
 
-export type RecordingTab = 'Spectrogram' | 'Time' | 'Frequency' | 'IQ' | 'Cyclostationary';
+export type RecordingTab = 'Spectrogram' | 'Time' | 'Demod' | 'Frequency' | 'IQ' | 'Cyclostationary';
 export type ShellTab = 'Live' | RecordingTab;
 
 interface Props {
@@ -18,7 +18,7 @@ interface Props {
   currentRecordingPath?: string | null;
 }
 
-const RECORDING_TABS: RecordingTab[] = ['Spectrogram', 'Time', 'Frequency', 'IQ', 'Cyclostationary'];
+const RECORDING_TABS: RecordingTab[] = ['Spectrogram', 'Time', 'Demod', 'Frequency', 'IQ', 'Cyclostationary'];
 
 export function TopTabs({ activeTab, onSelectRecordingTab, currentRecordingPath }: Props) {
   const navigate = useNavigate();
