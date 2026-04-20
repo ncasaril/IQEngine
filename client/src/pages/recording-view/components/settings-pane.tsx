@@ -19,7 +19,6 @@ interface SettingsPaneProps {
 
 const SettingsPane = ({ currentFFT }) => {
   const fftSizes = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
-  const zoomLevels = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
   const windowFunctions = ['hamming', 'rectangle', 'hanning', 'barlett', 'blackman'];
   const context = useSpectrogramContext();
   const sampleRate = context.meta?.getSampleRate() || 0;
@@ -83,9 +82,14 @@ const SettingsPane = ({ currentFFT }) => {
     a.remove(); // remove element from dom
   };
 
-  // Calculate number of ffts we skip per image line in order to show N% of the total file in the spectrogram. The first element in the array is special, don't skip
-  const onePercent = context.meta.getTotalSamples() / context.fftSize / 100;
-  const zoomStepSizes = zoomLevels.map((z) => Math.floor((onePercent * z) / context.spectrogramHeight));
+  // Zoom-out slider in powers of two — each step aggregates 2× more FFT rows per
+  // display row (so 8 steps cover 1×→128×). This matches the server-side tile
+  // pyramid (rows_per_tile_row = 1, 2, 4, 8, …) and gives each slider position a
+  // visibly different zoom level. Steps that would aggregate more rows than the
+  // file has are clipped.
+  const totalFfts = Math.max(1, Math.floor(context.meta.getTotalSamples() / context.fftSize));
+  const maxStep = Math.max(0, Math.floor(Math.log2(Math.max(1, totalFfts / Math.max(1, context.spectrogramHeight)))));
+  const zoomStepSizes = Array.from({ length: maxStep + 1 }, (_, i) => (1 << i) - 1);
 
   const onChangePythonSnippet = useCallback(
     (value: string) => {
