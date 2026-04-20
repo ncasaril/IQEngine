@@ -49,7 +49,7 @@ export function DisplaySpectrogram({ currentFFT, setCurrentFFT, currentTab }) {
   const { width, height } = useWindowSize();
 
   // Server-side tile rendering (parallel path)
-  const { image: serverImage, loading: serverLoading } = useServerSpectrogram(currentFFT);
+  const { image: serverImage, imageOffsetY: serverImageOffsetY, loading: serverLoading } = useServerSpectrogram(currentFFT);
 
   useEffect(() => {
     const spectrogramHeight = height - 450; // hand-tuned for now
@@ -70,6 +70,9 @@ export function DisplaySpectrogram({ currentFFT, setCurrentFFT, currentTab }) {
 
   // Use server image when server-side FFT is enabled, otherwise use client-side
   const image = serverSideFFT ? serverImage : clientImage;
+  // Server tile hook shifts the composite instead of repainting when a scroll
+  // stays within the currently-painted tile set, so honour its Y offset.
+  const imageY = serverSideFFT ? serverImageOffsetY : 0;
 
   function handleWheel(evt: KonvaEventObject<WheelEvent>): void {
     evt.evt.preventDefault();
@@ -103,7 +106,7 @@ export function DisplaySpectrogram({ currentFFT, setCurrentFFT, currentTab }) {
           <div className="flex flex-row" id="spectrogram">
             <Stage width={spectrogramWidth} height={spectrogramHeight}>
               <Layer onWheel={handleWheel} imageSmoothingEnabled={false}>
-                <Image image={image} x={0} y={0} width={spectrogramWidth} height={spectrogramHeight} />
+                <Image image={image} x={0} y={imageY} width={spectrogramWidth} height={spectrogramHeight} />
               </Layer>
               <AnnotationViewer currentFFT={currentFFT} />
               <FreqSelector />
