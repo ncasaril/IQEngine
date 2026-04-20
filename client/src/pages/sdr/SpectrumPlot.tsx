@@ -139,9 +139,27 @@ export function SpectrumPlot({
           onStatus?.(`Error: ${msg.error}`);
         }
       } else if (ev.data instanceof ArrayBuffer && pendingMetaRef.current) {
+        const meta = pendingMetaRef.current;
         const frame = new Float32Array(ev.data);
         pendingMetaRef.current = null;
         latestFrameRef.current = frame;
+        // Frames carry the current monitor center/sample_rate — on retune the backend
+        // updates these without re-sending a `config` message, so pick them up here
+        // to keep onConfig/onStatus consumers (e.g. the "Live N MHz" pill, demod offset
+        // display) in sync with the actual tuning.
+        const cfg = configRef.current;
+        if (cfg && (cfg.center_freq_hz !== meta.center_freq_hz || cfg.sample_rate_hz !== meta.sample_rate_hz)) {
+          const updated: SpectrumConfig = {
+            ...cfg,
+            center_freq_hz: meta.center_freq_hz,
+            sample_rate_hz: meta.sample_rate_hz,
+            bin_hz: meta.sample_rate_hz / cfg.fft_size,
+          };
+          configRef.current = updated;
+          setConfig(updated);
+          onConfig?.(updated);
+          onStatus?.(`Live — ${(updated.center_freq_hz / 1e6).toFixed(3)} MHz`);
+        }
         // Update max-hold (in raw dB — offset is applied at draw time)
         const prev = maxHoldRef.current;
         if (!prev || prev.length !== frame.length) {
@@ -189,21 +207,38 @@ export function SpectrumPlot({
     return () => cancelAnimationFrame(raf);
   }, [minDb, maxDb, refOffsetDb, maxHold, paused, channelCenterHz, channelBandwidthHz]);
 
-  // Resize the canvas buffer to match its CSS pixel size
+  // Resize the canvas buffer to match its CSS pixel size.
+  // Only touch width/height if they actually changed (HTML canvas clears the bitmap on any
+  // width/height assignment, so unconditional resize produced a flash during user-driven resizes).
+  // After any real resize we immediately redraw from the last frame so no blank frames sneak through.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const setSize = () => {
       const dpr = window.devicePixelRatio || 1;
-      const cw = canvas.clientWidth;
-      canvas.width = Math.floor(cw * dpr);
-      canvas.height = Math.floor(height * dpr);
+      const desiredW = Math.floor(canvas.clientWidth * dpr);
+      const desiredH = Math.floor(height * dpr);
+      if (canvas.width !== desiredW || canvas.height !== desiredH) {
+        canvas.width = desiredW;
+        canvas.height = desiredH;
+        drawSpectrum(canvas, {
+          config: configRef.current,
+          live: paused && pausedFrameRef.current ? pausedFrameRef.current : latestFrameRef.current,
+          maxHold: maxHold ? maxHoldRef.current : null,
+          minDb,
+          maxDb,
+          refOffsetDb,
+          paused,
+          channelCenterHz,
+          channelBandwidthHz,
+        });
+      }
     };
     setSize();
     const ro = new ResizeObserver(setSize);
     ro.observe(canvas);
     return () => ro.disconnect();
-  }, [height]);
+  }, [height, paused, maxHold, minDb, maxDb, refOffsetDb, channelCenterHz, channelBandwidthHz]);
 
   const frameToHz = useCallback(
     (pxX: number, canvasW: number) => {

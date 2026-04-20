@@ -160,7 +160,7 @@ export const CyclostationaryPlot = ({ displayedIQ, fftStepSize }: Cyclostationar
               <span className="text-base">Alpha Start [0-1]</span>
               <input
                 type="text"
-                className="h-8 w-54 rounded-l text-base-100 ml-1 pl-2"
+                className="h-8 w-full box-border rounded-l text-base-100 mt-1 px-2"
                 defaultValue={alphaStart}
                 onChange={(e) => {
                   setAlphaStart(parseFloat(e.target.value));
@@ -172,7 +172,7 @@ export const CyclostationaryPlot = ({ displayedIQ, fftStepSize }: Cyclostationar
               <span className="text-base ">Alpha Stop [0-1]</span>
               <input
                 type="text"
-                className="h-8 w-54 rounded-l text-base-100 ml-1 pl-2"
+                className="h-8 w-full box-border rounded-l text-base-100 mt-1 px-2"
                 defaultValue={alphaStop}
                 onChange={(e) => {
                   setAlphaStop(parseFloat(e.target.value));
@@ -184,7 +184,7 @@ export const CyclostationaryPlot = ({ displayedIQ, fftStepSize }: Cyclostationar
               <span className="text-base ">Alpha Step</span>
               <input
                 type="text"
-                className="h-8 w-54 rounded-l text-base-100 ml-1 pl-2"
+                className="h-8 w-full box-border rounded-l text-base-100 mt-1 px-2"
                 defaultValue={alphaStep}
                 onChange={(e) => {
                   setAlphaStep(parseFloat(e.target.value));

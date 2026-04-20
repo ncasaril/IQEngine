@@ -235,7 +235,7 @@ const SettingsPane = ({ currentFFT }) => {
           <div className="mt-2 flex">
             <input
               type="text"
-              className="h-8 w-54 rounded-l text-base-100 ml-1 pl-2"
+              className="h-8 flex-1 min-w-0 rounded-l text-base-100 ml-1 pl-2"
               defaultValue={localTaps}
               onChange={(e) => {
                 setLocalTaps(e.target.value);

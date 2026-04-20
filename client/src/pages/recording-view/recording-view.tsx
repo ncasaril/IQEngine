@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useLocation, useParams, useSearchParams } from 'react-router-dom';
+import { TopTabs, LAST_RECORDING_STORAGE_KEY, RecordingTab } from '@/pages/shared/top-tabs';
 import { useSpectrogram } from './hooks/use-spectrogram';
 import { Layer, Stage, Image } from 'react-konva';
 import { useGetImage } from './hooks/use-get-image';
@@ -144,10 +145,22 @@ enum Tab {
 
 export function RecordingViewPage() {
   const { type, account, container, filePath } = useParams();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
   const { data: meta } = useMeta(type, account, container, filePath);
-  const [currentTab, setCurrentTab] = useState<Tab>(Tab.Spectrogram);
+  const initialTabFromQuery = searchParams.get('tab') as RecordingTab | null;
+  const [currentTab, setCurrentTab] = useState<Tab>(
+    initialTabFromQuery && Tab[initialTabFromQuery] !== undefined ? Tab[initialTabFromQuery] : Tab.Spectrogram
+  );
   const [currentFFT, setCurrentFFT] = useState<number>(0);
-  const Tabs = Object.keys(Tab).filter((key) => isNaN(Number(key)));
+
+  // Remember the last recording so /sdr/live can navigate back here.
+  useEffect(() => {
+    const path = `${location.pathname}`;
+    if (type && account && container && filePath) {
+      window.localStorage.setItem(LAST_RECORDING_STORAGE_KEY, path);
+    }
+  }, [location.pathname, type, account, container, filePath]);
 
   if (!meta) {
     return (
@@ -163,23 +176,11 @@ export function RecordingViewPage() {
           <div className="flex flex-row w-full">
             <Sidebar currentFFT={currentFFT} />
             <div className="flex flex-col pl-3">
-              <div className="flex space-x-2 border-b border-primary w-full sm:pl-12 lg:pl-32" id="tabsbar">
-                {Tabs.map((key) => {
-                  return (
-                    <div
-                      key={key}
-                      onClick={() => {
-                        setCurrentTab(Tab[key as keyof typeof Tab]);
-                      }}
-                      className={` ${
-                        currentTab === Tab[key as keyof typeof Tab] ? 'bg-primary !text-base-100' : ''
-                      } inline-block px-3 py-0 outline outline-primary outline-1 text-lg text-primary hover:text-accent hover:shadow-lg hover:shadow-accent`}
-                    >
-                      {key}
-                    </div>
-                  );
-                })}
-              </div>
+              <TopTabs
+                activeTab={Tab[currentTab] as RecordingTab}
+                currentRecordingPath={location.pathname}
+                onSelectRecordingTab={(tab) => setCurrentTab(Tab[tab])}
+              />
               {/* The following displays the spectrogram, time, freq, and IQ plots depending on which one is selected*/}
               <DisplaySpectrogram currentFFT={currentFFT} setCurrentFFT={setCurrentFFT} currentTab={currentTab} />
               <DisplayMetaSummary />

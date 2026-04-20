@@ -15,6 +15,7 @@ class fm_receiver(Plugin):
 
     # custom params
     target_freq: float = 0
+    gain: float = 1.0
 
     def rf_function(self, samples, job_context=None):
         # Freq shift if desired
@@ -36,8 +37,11 @@ class fm_receiver(Plugin):
         # decimate by 10 to get mono audio close to 48 kHz
         samples = samples[::10]
 
-        # normalize volume so its between -1 and +1
-        samples /= np.max(np.abs(samples))
+        # normalize volume so its between -1 and +1, then apply user gain and clip
+        peak = np.max(np.abs(samples))
+        if peak > 0:
+            samples = samples / peak
+        samples = np.clip(samples * self.gain, -1.0, 1.0)
 
         # some machines want int16s
         samples *= 32767

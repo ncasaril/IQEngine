@@ -157,98 +157,82 @@ export function DemodPlayer({ active, demod, onChange, monitorCenterHz, monitorS
   const shiftHz = demod.centerHz - (monitorCenterHz ?? 0);
 
   return (
-    <div className="card bg-base-200 p-3 mb-3">
-      <div className="grid grid-cols-2 md:grid-cols-8 gap-2 items-end">
-        <label className="flex flex-col text-xs">
-          <span className="opacity-70">Demod</span>
-          <button
-            className={`btn btn-xs ${demod.enabled ? 'btn-primary' : 'btn-ghost'}`}
-            onClick={() => onChange({ enabled: !demod.enabled })}
-            disabled={!active}
-          >
-            {demod.enabled ? 'On' : 'Off'}
-          </button>
-        </label>
-        <label className="flex flex-col text-xs">
-          <span className="opacity-70">Mode</span>
-          <select
-            className="select select-bordered select-sm"
-            value={demod.mode}
-            onChange={(e) => {
-              const mode = e.target.value as DemodMode;
-              const opt = MODE_OPTIONS.find((o) => o.value === mode);
-              onChange({ mode, bandwidthHz: opt?.defaultBandwidth ?? demod.bandwidthHz });
-            }}
-          >
-            {MODE_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col text-xs">
-          <span className="opacity-70">Tune (MHz)</span>
-          <input
-            type="number"
-            step="0.001"
-            className="input input-bordered input-sm"
-            value={(demod.centerHz / 1e6).toFixed(3)}
-            onChange={(e) => onChange({ centerHz: parseFloat(e.target.value) * 1e6 })}
-          />
-        </label>
-        <label className="flex flex-col text-xs">
-          <span className="opacity-70">Offset (kHz)</span>
-          <div className="input input-bordered input-sm flex items-center font-mono">
-            {(shiftHz / 1e3).toFixed(1)}
-          </div>
-        </label>
-        <label className="flex flex-col text-xs">
-          <span className="opacity-70">BW (kHz)</span>
-          <input
-            type="number"
-            step="1"
-            min="1"
-            className="input input-bordered input-sm"
-            value={(demod.bandwidthHz / 1e3).toFixed(1)}
-            onChange={(e) => onChange({ bandwidthHz: Math.max(100, parseFloat(e.target.value) * 1e3) })}
-          />
-        </label>
-        <label className="flex flex-col text-xs">
-          <span className="opacity-70">Vol ({demod.volumeDb.toFixed(0)} dB)</span>
-          <input
-            type="range"
-            min={-40}
-            max={20}
-            step={1}
-            value={demod.volumeDb}
-            onChange={(e) => onChange({ volumeDb: parseFloat(e.target.value) })}
-            className="range range-xs"
-          />
-        </label>
-        <div className="flex flex-col text-xs gap-1">
-          <span className="opacity-70">Mute</span>
-          <button
-            className={`btn btn-xs ${demod.muted ? 'btn-warning' : 'btn-ghost'}`}
-            onClick={() => onChange({ muted: !demod.muted })}
-          >
-            {demod.muted ? 'Muted' : 'Audible'}
-          </button>
-        </div>
-        <div className="flex flex-col text-xs">
-          <span className="opacity-70">Status</span>
-          <div
-            className="input input-bordered input-sm flex items-center justify-between font-mono text-[10px]"
-            style={{ color: statusPill.color }}
-          >
-            <span>{statusPill.label}</span>
-            {demod.enabled && status === 'streaming' && (
-              <span className="opacity-70 ml-1">{queuedMs}ms</span>
-            )}
-          </div>
-        </div>
+    <div className="flex flex-col gap-2 text-xs">
+      <div className="flex gap-1">
+        <button
+          className={`btn btn-xs flex-1 ${demod.enabled ? 'btn-primary' : 'btn-ghost'}`}
+          onClick={() => onChange({ enabled: !demod.enabled })}
+          disabled={!active}
+        >
+          {demod.enabled ? 'On' : 'Off'}
+        </button>
+        <button
+          className={`btn btn-xs flex-1 ${demod.muted ? 'btn-warning' : 'btn-ghost'}`}
+          onClick={() => onChange({ muted: !demod.muted })}
+        >
+          {demod.muted ? 'Muted' : 'Audible'}
+        </button>
       </div>
-      <p className="text-[10px] opacity-50 mt-2">
-        Click the spectrum to tune the demod; drag (coming soon) to set bandwidth.
-        Audio is 48 kHz mono int16 PCM streamed via WebSocket.
+      <label className="flex flex-col">
+        <span className="opacity-70">Mode</span>
+        <select
+          className="select select-bordered select-sm w-full"
+          value={demod.mode}
+          onChange={(e) => {
+            const mode = e.target.value as DemodMode;
+            const opt = MODE_OPTIONS.find((o) => o.value === mode);
+            onChange({ mode, bandwidthHz: opt?.defaultBandwidth ?? demod.bandwidthHz });
+          }}
+        >
+          {MODE_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </label>
+      <label className="flex flex-col">
+        <span className="opacity-70">Tune (MHz) · offset {(shiftHz / 1e3).toFixed(1)} kHz</span>
+        <input
+          type="number"
+          step="0.001"
+          className="input input-bordered input-sm w-full"
+          value={(demod.centerHz / 1e6).toFixed(3)}
+          onChange={(e) => onChange({ centerHz: parseFloat(e.target.value) * 1e6 })}
+        />
+      </label>
+      <label className="flex flex-col">
+        <span className="opacity-70">Bandwidth (kHz)</span>
+        <input
+          type="number"
+          step="1"
+          min="1"
+          className="input input-bordered input-sm w-full"
+          value={(demod.bandwidthHz / 1e3).toFixed(1)}
+          onChange={(e) => onChange({ bandwidthHz: Math.max(100, parseFloat(e.target.value) * 1e3) })}
+        />
+      </label>
+      <label className="flex flex-col">
+        <span className="opacity-70">Volume: {demod.volumeDb.toFixed(0)} dB</span>
+        <input
+          type="range"
+          min={-40}
+          max={20}
+          step={1}
+          value={demod.volumeDb}
+          onChange={(e) => onChange({ volumeDb: parseFloat(e.target.value) })}
+          className="range range-xs range-primary w-full"
+        />
+      </label>
+      <div
+        className="input input-bordered input-sm flex items-center justify-between font-mono text-[10px]"
+        style={{ color: statusPill.color }}
+      >
+        <span>{statusPill.label}</span>
+        {demod.enabled && status === 'streaming' && (
+          <span className="opacity-70 ml-1">{queuedMs}ms</span>
+        )}
+      </div>
+      <p className="text-[10px] opacity-50">
+        Click the spectrum to retune. Audio is 48 kHz mono PCM.
       </p>
     </div>
   );

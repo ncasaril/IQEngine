@@ -51,29 +51,45 @@ export function EditPluginParameters({ pluginUrl, setPluginParameters, pluginPar
       {pluginParameters && Object.keys(pluginParameters).length > 0 && (
         <>
           <div className="mb-3">
-            {Object.keys(pluginParameters).map((key, index) => (
-              <div key={index + 100000}>
-                <label className="label pb-0">{pluginParameters[key].title}</label>
-                <input
-                  type={pluginParameters[key].type}
-                  name={key}
-                  value={pluginParameters[key].value}
-                  onChange={(e) => {
-                    console.log('e.target.value', e.target.value);
-                    setPluginParameters((prev) => {
-                      return {
-                        ...prev,
-                        [key]: {
-                          ...prev[key],
-                          value: e.target.value,
-                        },
-                      };
-                    });
-                  }}
-                  className="h-8 rounded text-base-100 ml-1 pl-2"
-                />
-              </div>
-            ))}
+            {Object.keys(pluginParameters).map((key, index) => {
+              const setValue = (v: any) =>
+                setPluginParameters((prev) => ({
+                  ...prev,
+                  [key]: { ...prev[key], value: v },
+                }));
+              if (key === 'gain') {
+                const numeric = parseFloat(pluginParameters[key].value) || 0;
+                return (
+                  <div key={index + 100000}>
+                    <label className="label pb-0">
+                      {pluginParameters[key].title}: {numeric.toFixed(2)}×
+                    </label>
+                    <input
+                      type="range"
+                      min={0}
+                      max={4}
+                      step={0.05}
+                      name={key}
+                      value={numeric}
+                      onChange={(e) => setValue(parseFloat(e.target.value))}
+                      className="range range-xs range-primary w-full"
+                    />
+                  </div>
+                );
+              }
+              return (
+                <div key={index + 100000}>
+                  <label className="label pb-0">{pluginParameters[key].title}</label>
+                  <input
+                    type={pluginParameters[key].type}
+                    name={key}
+                    value={pluginParameters[key].value}
+                    onChange={(e) => setValue(e.target.value)}
+                    className="h-8 w-full box-border rounded text-base-100 px-2"
+                  />
+                </div>
+              );
+            })}
           </div>
         </>
       )}
