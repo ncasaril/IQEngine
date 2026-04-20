@@ -19,7 +19,7 @@ interface ServerSpectrogramResult {
 }
 
 export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResult {
-  const { account, container, filePath, fftSize, spectrogramHeight, spectrogramWidth, colmap, windowFunction, magnitudeMin, magnitudeMax } =
+  const { account, container, filePath, fftSize, fftStepSize, spectrogramHeight, spectrogramWidth, colmap, windowFunction, magnitudeMin, magnitudeMax } =
     useSpectrogramContext();
 
   const [tileInfo, setTileInfo] = useState<TileInfo | null>(null);
@@ -49,12 +49,26 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     };
   }, [account, container, filePath, fftSize]);
 
-  // Determine zoom level based on viewport vs total FFTs
+  // Pick the zoom level whose `rows_per_tile_row` matches the Zoom Out Level slider.
+  // fftStepSize = N means each displayed row should aggregate N+1 source FFT rows.
+  // Choose the most-zoomed-out level whose rows_per_tile_row still fits within `desired`
+  // (i.e. the largest rpr that is ≤ desired) so we don't over-aggregate.
+  // At fftStepSize=0 → desired=1 → picks max_zoom (1:1).
   const zoom = useMemo(() => {
     if (!tileInfo) return 0;
-    // Use max zoom (1:1) for now — could add zoom-out logic based on fftStepSize
-    return tileInfo.max_zoom;
-  }, [tileInfo]);
+    const desired = fftStepSize + 1;
+    let pick = tileInfo.max_zoom;
+    let pickRpr = 1;
+    for (const key of Object.keys(tileInfo.zoom_levels)) {
+      const z = parseInt(key, 10);
+      const rpr = tileInfo.zoom_levels[z]?.rows_per_tile_row ?? 1;
+      if (rpr <= desired && rpr > pickRpr) {
+        pick = z;
+        pickRpr = rpr;
+      }
+    }
+    return pick;
+  }, [tileInfo, fftStepSize]);
 
   // Fetch visible tiles and composite them
   useEffect(() => {
@@ -150,7 +164,7 @@ export function useServerSpectrogram(currentFFT: number): ServerSpectrogramResul
     return () => {
       controller.abort();
     };
-  }, [tileInfo, zoom, currentFFT, spectrogramHeight, spectrogramWidth, colmap, magnitudeMin, magnitudeMax, windowFunction, fftSize, account, container, filePath]);
+  }, [tileInfo, zoom, currentFFT, spectrogramHeight, spectrogramWidth, colmap, magnitudeMin, magnitudeMax, windowFunction, fftSize, fftStepSize, account, container, filePath]);
 
   return {
     image,

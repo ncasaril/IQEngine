@@ -101,9 +101,12 @@ export function getVisibleTiles(
   const rowsPerTileRow = zoomLevel.rows_per_tile_row;
   const tileHeight = tileInfo.tile_height;
 
-  // Which tile indices cover the viewport?
+  // `viewportStartFFT` is in original FFT units; `viewportHeight` is in viewport PIXELS.
+  // Each viewport pixel corresponds to one row of the zoomed tile (which itself
+  // aggregates `rowsPerTileRow` original FFTs). So the viewport spans
+  // `viewportHeight * rowsPerTileRow` original FFTs.
   const effectiveStartFFT = Math.floor(viewportStartFFT / rowsPerTileRow);
-  const effectiveEndFFT = Math.ceil((viewportStartFFT + viewportHeight) / rowsPerTileRow);
+  const effectiveEndFFT = effectiveStartFFT + viewportHeight;
 
   const startTile = Math.floor(effectiveStartFFT / tileHeight);
   const endTile = Math.ceil(effectiveEndFFT / tileHeight);
