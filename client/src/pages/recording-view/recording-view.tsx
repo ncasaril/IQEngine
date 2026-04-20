@@ -113,7 +113,7 @@ export function DisplaySpectrogram({ currentFFT, setCurrentFFT, currentTab }) {
               <FreqShiftSelector />
               <TimeSelector currentFFT={currentFFT} />
             </Stage>
-            <Stage width={50} height={spectrogramHeight} className="mr-1">
+            <Stage width={80} height={spectrogramHeight} className="mr-1">
               <RulerSide currentRowAtTop={currentFFT} />
             </Stage>
             <Stage width={MINIMAP_FFT_SIZE + 5} height={spectrogramHeight}>
