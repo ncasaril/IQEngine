@@ -155,6 +155,40 @@ async def sync_datasource(
     return {"message": "Syncing"}
 
 
+@router.post("/api/datasources/{account}/{container}/resync-local", status_code=202)
+async def resync_local_datasource(
+    account: str,
+    container: str,
+    background_tasks: BackgroundTasks,
+):
+    """Trigger a filesystem rescan for a local datasource.
+
+    Intended for dev setups backed by IQENGINE_BACKEND_LOCAL_FILEPATH: drop new
+    .sigmf-meta/.sigmf-data pairs into the tree and hit this endpoint to pick
+    them up without restarting the API. Gated on IN_MEMORY_DB=1 so it can't
+    be used to bypass auth in deployed instances.
+    """
+    if os.getenv("IN_MEMORY_DB") != "1":
+        raise HTTPException(status_code=404, detail="resync-local is only available in dev mode (IN_MEMORY_DB=1)")
+
+    existing_datasource = await db().datasources.find_one(
+        {"account": account, "container": container}
+    )
+    if not existing_datasource:
+        raise HTTPException(status_code=404, detail="Datasource not found")
+
+    # Drop the metadata cache so deleted files actually disappear, then re-sync
+    # from the filesystem.
+    from .metadata import collection
+
+    metadata_collection = collection()
+    await metadata_collection.delete_many(
+        {"global.traceability:origin.account": account, "global.traceability:origin.container": container}
+    )
+    background_tasks.add_task(datasources.sync, account, container, existing_datasource.get("awsAccessKeyId"))
+    return {"message": f"Resyncing {account}/{container}"}
+
+
 @router.get("/api/datasources/{account}/{container}/{file_path}/sas")
 async def generate_sas_token(
     account: str,

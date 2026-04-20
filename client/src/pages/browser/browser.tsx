@@ -19,6 +19,7 @@ import { ModalDialog } from '@/features/ui/modal/Modal';
 import { MetadataQuery } from './metadata-query/metadata-query';
 import { SmartQuery } from './metadata-query/smart-query';
 import { CustomAzureForm } from './custom-azure-form';
+import { useQueryClient } from '@tanstack/react-query';
 
 export const Browser = () => {
   const apiDataSources = getDataSources(CLIENT_TYPE_API); // doesn't load immediately
@@ -35,6 +36,33 @@ export const Browser = () => {
   const [showModal, setShowModal] = useState(false);
   const [queryActive, setQueryActive] = useState(false);
   const [defaultRepoSet, setDefaultRepoSet] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const reactQueryClient = useQueryClient();
+
+  const refreshDatasource = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      const resp = await fetch(
+        `/api/datasources/${currentAccount}/${currentContainer}/resync-local`,
+        { method: 'POST' }
+      );
+      if (!resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        throw new Error(d.detail || `HTTP ${resp.status}`);
+      }
+      // Give the background task a moment to write new metadata, then invalidate
+      // the local react-query caches so the directory listing refetches.
+      await new Promise((r) => setTimeout(r, 800));
+      await reactQueryClient.invalidateQueries(['datasource', currentType, currentAccount, currentContainer]);
+      await reactQueryClient.invalidateQueries(['datasource', currentType, currentAccount, currentContainer, 'meta', 'paths']);
+      toast.success('Datasource refreshed');
+    } catch (e: any) {
+      toast.error(`Refresh failed: ${e.message}`);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const localDataSourceQuery = getDataSource(
     CLIENT_TYPE_LOCAL,
@@ -275,7 +303,17 @@ export const Browser = () => {
             </div>
           )}
           {metadataCollection.isFetched && !queryActive && (
-            <div className="flex justify-items-stretch text-start w-full">
+            <div className="flex flex-col text-start w-full">
+              <div className="flex justify-end mb-2 pr-2">
+                <button
+                  className="btn btn-sm btn-outline btn-primary"
+                  onClick={refreshDatasource}
+                  disabled={refreshing}
+                  title="Rescan the datasource filesystem for new / removed recordings"
+                >
+                  {refreshing ? 'Refreshing…' : 'Refresh'}
+                </button>
+              </div>
               <table className="w-full">
                 <thead>
                   <tr>
