@@ -168,10 +168,10 @@ const SettingsPane = ({ currentFFT }) => {
         </label>
 
         <DualRangeSlider
-          min={-150.0}
-          minValue={Math.max(-150, Math.min(50, context.magnitudeMin))}
+          min={-200.0}
+          minValue={Math.max(-200, Math.min(50, context.magnitudeMin))}
           max={50.0}
-          maxValue={Math.max(-150, Math.min(50, context.magnitudeMax))}
+          maxValue={Math.max(-200, Math.min(50, context.magnitudeMax))}
           setMin={context.setMagnitudeMin}
           setMax={context.setMagnitudeMax}
           unit="dB"
