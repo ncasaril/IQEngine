@@ -6,7 +6,7 @@ This document tracks the implementation plan for extending IQEngine with:
 3. Structured REST API for AI agent consumption (MCP-ready)
 4. MCP stdio server wrapping the agent API (`api/mcp_server/`)
 
-## Current Status: M1–M7 + M6 + MCP server + M9 (live demod) + M10 (perf/UX pass) complete
+## Current Status: M1–M7 + M6 + MCP server + M9 (live demod) + M10 (perf/UX pass) + M8 (tile cache + optional GPU FFT) complete
 
 Commits on `main`:
 - `617e2b0` — initial implementation of all three components (M1–M7)
@@ -27,6 +27,11 @@ Commits on `main`:
 - `e9df3eb` — Time zoom-in slider + Show Annotations toggle
 - `eb76b6f` — Smooth scroll: slide the composite instead of repainting
 - `26fab3c` — Y-axis ruler: show unit, honour zoom, one unit per ruler
+- `0b9197f` — AM/FM Demod tab (pulse / TDMA inspector)
+- `abcc0ff` — Oversized tile ring buffer for server-side spectrogram
+- `da476fe` — Abort tile compute on client disconnect (cooperative cancel)
+- `d802b75` — Per-tile ImageBitmap cache in use-server-spectrogram
+- `d8e47c7` — M8: filesystem tile cache + optional cupy GPU FFT
 
 ---
 
@@ -196,10 +201,10 @@ Query params: `fft_size`, `cmap`, `max_rows` (strip height after decimation, def
 - [x] Launcher: `api/mcp_server/run.sh` — stdio transport
 - [x] Registered with Claude Code at user scope: `claude mcp add -s user iqengine /home/niklas/git/IQEngine/api/mcp_server/run.sh`
 
-### M8 — GPU Acceleration & Tile Caching
+### M8 — GPU Acceleration & Tile Caching (done 2026-04-20)
 
-- [ ] Optional `cupy` path in `spectrogram_engine.compute_spectrogram_db` with auto-fallback to numpy
-- [ ] Filesystem tile cache at `$IQENGINE_TILE_CACHE_DIR/{path}/z{zoom}/t{index}.f32` (lazy, LRU eviction). Keyed by `{zoom, tileIndex, window, freqZoomKey}` to match the client-side cache — colormap / mag no longer invalidate since clients colormap float32 tiles themselves.
+- [x] Optional `cupy` path in `spectrogram_engine.compute_spectrogram_db` with auto-fallback to numpy. Gated by `IQENGINE_GPU_FFT=1`; probes `cupy.cuda.runtime.getDeviceCount()` once and falls back silently when missing.
+- [x] Filesystem tile cache at `$IQENGINE_TILE_CACHE_DIR`, sharded by hash-prefix (`{dir}/{hash[:2]}/{hash}.tile`). Keyed by `{filepath, fft_size, window, freq_zoom_key, zoom, time_index}` — same invariants as the client-side tile cache, colormap/mag not included. LRU-pruned every ~64 writes, cap via `IQENGINE_TILE_CACHE_MAX_FILES` (default 8192). Responses carry `X-Tile-Cache: hit|miss`. Observed ~70x speedup on a big zoom-4 tile (630 ms → 9 ms).
 
 ### M9 — Live SDR (done 2026-04-17)
 
@@ -246,17 +251,14 @@ Infra / deploy:
 - [ ] Build the SoapySDR Python bindings wheel and vendor it in `api/vendor/` so any Python 3.11 environment can install it
 - [ ] Write the n20 setup as `make setup-n20` in the Makefile
 
-Perf / architecture (next scrolling layer):
-- [ ] **Oversized tile ring buffer.** Today the fast-path slide works within the currently-painted tile set, but crossing a tile boundary still triggers a repaint (visible even if brief). Paint an off-screen buffer ≥ 2× viewport so neighbouring tiles are pre-composed, invalidate only when the scroll window moves outside the buffered region. Then tile-boundary crossings are invisible and repaint moves to the "you wandered a long way" threshold.
-- [ ] **Server-side `request.is_disconnected()` polling** in the tile handler so abandoned numpy work can abort mid-computation. Today a cancelled request still burns CPU to completion because the numpy call doesn't yield. Right shape: yield control every ~250 ms inside `compute_tile_db` and bail if the client is gone.
-- [ ] **Per-tile ImageBitmap cache** in `use-server-spectrogram`. Currently the hook recolors from raw dB on every full repaint; for drag-scrolling across many tiles this adds ~5 ms per tile per commit. Cache the post-colormap `ImageBitmap` keyed by `{tileKey, colmap, magMin, magMax}`, invalidate on slider change, so the repaint path is just N × drawImage.
-- [ ] **M8 GPU FFT** (see above). With `asyncio.to_thread` + OpenBLAS threading already in place, CPU throughput is decent; cupy gives another ~10-100× on large `fft_size`. Keep the numpy fallback.
+Perf / architecture (done in this round):
+- [x] **Oversized tile ring buffer.** Paints an off-screen composite 3× viewport tall, fast-paths any scroll that stays inside with a safety margin. Repaint only when the viewport enters the top/bottom margin. `abcc0ff`.
+- [x] **Server-side `request.is_disconnected()` polling** in the tile handler. Watchdog polls every 250 ms, sets a `threading.Event`, and the chunked FFT loop raises `TileCancelled` between chunks so abandoned numpy work no longer runs to completion. `da476fe`.
+- [x] **Per-tile ImageBitmap cache** in `use-server-spectrogram`. Cache keyed by `{tileKey | colmap | magMin | magMax}`, LRU-evicted to 80 entries with `.close()` on eviction. Repaints are now N × drawImage instead of N × recolor. `d802b75`.
+- [x] **M8 GPU FFT** — cupy path behind `IQENGINE_GPU_FFT=1`, numpy fallback. See M8 section above.
 
 Missing features:
-- [ ] **AM/FM demod tab (pulse / TDMA-packet inspector).** New tab to the right of "Time" in the recording-view tab strip, dedicated to looking at a cursor selection as time-domain demodulated audio-rate traces. Split view, two stacked traces against the same X (time):
-  - **Top: AM / envelope** — `|x|` of the freq-shifted + LPF'd IQ so bursts and packet envelopes read cleanly.
-  - **Bottom: FM / quadrature** — `diff(unwrap(angle(x)))` so instantaneous frequency deviations (chirps, FSK symbols, TDMA guard bands) are visible.
-  Share the existing time-cursor selection for the X window; reuse the Frequency Shift cursor for the down-mix center so the user can tune to the signal of interest on the spectrogram and the demod views update. Use the same decimation + LPF helpers as the `nfm_receiver` plugin, decimated to a few kHz so the trace fits the viewport, rendered with `scattergl` like the existing Time tab. This is the "zoom into one pulse" view that today needs a plugin round-trip.
+- [x] **AM/FM demod tab (pulse / TDMA-packet inspector).** `0b9197f`. New "Demod" tab right of "Time" with stacked AM envelope + FM instantaneous-freq traces, over the time-cursor selection (or the current spectrogram window). Mirrors `nfm_receiver`'s shift + FIR LPF + decimate pipeline in a TS worker.
 - [ ] **Client-side freq zoom.** The server path has decimation-based zoom (`apply_freq_zoom` + `compute_tile_db`). For small recordings the client-side FFT path (`use-spectrogram.tsx` + `use-get-image.tsx`) is used instead and freq zoom silently does nothing. Mirror the DSP on the client (shift + LPF + decimate) so zoom works for sub-10 M-sample files too.
 - [ ] **Horizontal scroll + freq-axis pan.** Today freq zoom re-centers on the freq-cursor box, but there's no way to pan left/right from there. Add a horizontal scrollbar + drag-to-pan inside the zoomed band.
 - [ ] **SSB audio quality.** Current `usb_receiver` / `lsb_receiver` do LPF + real-part SSB demod. Works for clean signals, noisy for marginal ones. Upgrade to a Weaver demodulator or a proper analytic-filter SSB.
