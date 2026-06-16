@@ -32,6 +32,7 @@ class SDRConfig:
     gain: float = 40.0  # dB
     antenna: str = ""
     bandwidth: float = 0.0  # Hz, 0 = auto
+    device_index: int = 0  # index into enumerate() / GET /sdr/devices
 
 
 @dataclass

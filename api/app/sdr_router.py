@@ -30,6 +30,7 @@ class CaptureRequest(BaseModel):
     duration_s: float = Field(1.0, description="Capture duration in seconds")
     antenna: str = Field("", description="Antenna port name")
     bandwidth: float = Field(0.0, description="Bandwidth in Hz (0=auto)")
+    device_index: int = Field(0, description="Index into GET /sdr/devices (0 = first enumerated device)")
 
 
 class MonitorStartRequest(BaseModel):
@@ -40,6 +41,7 @@ class MonitorStartRequest(BaseModel):
     max_segments: int = Field(50, description="Maximum segments to keep (0 disables disk segment writes)")
     antenna: str = Field("", description="Antenna port name")
     rolling_window_s: float = Field(30.0, description="Rolling IQ buffer length in seconds (capped to ~512 MB)")
+    device_index: int = Field(0, description="Index into GET /sdr/devices (0 = first enumerated device)")
 
 
 class RetuneRequest(BaseModel):
@@ -56,7 +58,12 @@ async def list_devices():
     """Enumerate connected SDR hardware."""
     device = get_device()
     devices = device.enumerate()
-    return {"devices": [{"driver": d.driver, "label": d.label, "serial": d.serial, "hardware": d.hardware, "extra": d.extra} for d in devices]}
+    return {
+        "devices": [
+            {"index": i, "driver": d.driver, "label": d.label, "serial": d.serial, "hardware": d.hardware, "extra": d.extra}
+            for i, d in enumerate(devices)
+        ]
+    }
 
 
 @router.get("/status")
@@ -82,6 +89,7 @@ async def start_capture(req: CaptureRequest):
         gain=req.gain,
         antenna=req.antenna,
         bandwidth=req.bandwidth,
+        device_index=req.device_index,
     )
 
     job = CaptureJob(
@@ -116,7 +124,7 @@ def _run_capture(job: CaptureJob, loop=None):
     try:
         job.status = "running"
         if not device.is_open:
-            device.open()
+            device.open(job.config.device_index)
         device.configure(job.config)
 
         num_samples = int(job.config.sample_rate * job.duration_s)
@@ -222,6 +230,7 @@ async def start_monitor(req: MonitorStartRequest):
         sample_rate=req.sample_rate,
         gain=req.gain,
         antenna=req.antenna,
+        device_index=req.device_index,
     )
 
     base_dir = os.getenv("IQENGINE_BACKEND_LOCAL_FILEPATH", os.path.join(os.getcwd(), "iqengine"))
@@ -264,6 +273,21 @@ async def stop_monitor():
     session_id, runner = running[0]
     runner.stop()
     return {"session_id": session_id, "status": "stopped"}
+
+
+@router.post("/monitor/stop-all")
+async def stop_all_monitors():
+    """Stop every running monitor session and release the device.
+
+    Recovery action for orphaned monitors — e.g. a session whose browser tab
+    navigated away while a monitor kept running server-side. Safe to call when
+    nothing is running (returns count 0).
+    """
+    monitors = get_active_monitors()
+    running = [(mid, m) for mid, m in monitors.items() if m.status == "running"]
+    for _, runner in running:
+        runner.stop()
+    return {"stopped": [mid for mid, _ in running], "count": len(running)}
 
 
 @router.post("/monitor/retune")

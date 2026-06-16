@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { LiveWaterfall } from './LiveWaterfall';
 
 interface SDRDevice {
+  index?: number;
   driver: string;
   label: string;
   serial: string;
@@ -34,6 +35,7 @@ interface MonitorStatus {
 
 export function SDRPage() {
   const [devices, setDevices] = useState<SDRDevice[]>([]);
+  const [selectedDevice, setSelectedDevice] = useState<number>(0);
   const [deviceStatus, setDeviceStatus] = useState<any>(null);
   const [captureForm, setCaptureForm] = useState<CaptureForm>({
     center_freq: 915e6,
@@ -52,6 +54,7 @@ export function SDRPage() {
   const [captureStatus, setCaptureStatus] = useState<string>('');
   const [monitorStatus, setMonitorStatus] = useState<MonitorStatus | null>(null);
   const [error, setError] = useState<string>('');
+  const [notice, setNotice] = useState<string>('');
 
   // Fetch devices on mount
   useEffect(() => {
@@ -68,9 +71,23 @@ export function SDRPage() {
       .catch(() => {});
   }, []);
 
+  // Pull authoritative monitor status from the server. Keeps a session object
+  // only when there's a real session, so an orphaned monitor started in another
+  // tab/session is detected on page load (and the Stop controls appear).
+  const fetchMonitorStatus = useCallback(() => {
+    return fetch('/api/sdr/monitor/status')
+      .then((r) => r.json())
+      .then((data) => {
+        setMonitorStatus(data && data.session_id ? data : null);
+        return data;
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     refreshStatus();
-  }, [refreshStatus]);
+    fetchMonitorStatus();
+  }, [refreshStatus, fetchMonitorStatus]);
 
   // Poll capture status
   useEffect(() => {
@@ -113,7 +130,7 @@ export function SDRPage() {
       const resp = await fetch('/api/sdr/capture', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(captureForm),
+        body: JSON.stringify({ ...captureForm, device_index: selectedDevice }),
       });
       if (!resp.ok) {
         const data = await resp.json();
@@ -133,10 +150,15 @@ export function SDRPage() {
       const resp = await fetch('/api/sdr/monitor/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(monitorForm),
+        body: JSON.stringify({ ...monitorForm, device_index: selectedDevice }),
       });
       if (!resp.ok) {
         const data = await resp.json();
+        // 409 = a monitor is already running (possibly orphaned from another
+        // tab). Surface it so the Stop controls appear.
+        if (resp.status === 409) {
+          await fetchMonitorStatus();
+        }
         throw new Error(data.detail || `HTTP ${resp.status}`);
       }
       const data = await resp.json();
@@ -149,7 +171,20 @@ export function SDRPage() {
   const stopMonitor = async () => {
     try {
       await fetch('/api/sdr/monitor/stop', { method: 'POST' });
-      setMonitorStatus((prev) => (prev ? { ...prev, status: 'stopped' } : null));
+      await fetchMonitorStatus();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
+  const stopAllMonitors = async () => {
+    setError('');
+    try {
+      const resp = await fetch('/api/sdr/monitor/stop-all', { method: 'POST' });
+      const data = await resp.json();
+      await fetchMonitorStatus();
+      refreshStatus();
+      setNotice(data.count > 0 ? `Stopped ${data.count} monitor session(s).` : 'No monitors were running.');
     } catch (e: any) {
       setError(e.message);
     }
@@ -188,19 +223,45 @@ export function SDRPage() {
         </div>
       )}
 
+      {notice && (
+        <div className="alert alert-info mb-4">
+          <span>{notice}</span>
+          <button className="btn btn-sm btn-ghost" onClick={() => setNotice('')}>
+            x
+          </button>
+        </div>
+      )}
+
       {/* Device Info */}
       <div className="card bg-base-200 p-4 mb-4">
         <h2 className="text-lg font-bold mb-2">Devices</h2>
         {devices.length === 0 ? (
           <p className="text-sm opacity-70">No SDR devices detected (SDR feature may be disabled)</p>
         ) : (
-          <ul className="text-sm">
-            {devices.map((d, i) => (
-              <li key={i}>
-                <strong>{d.label}</strong> — {d.driver} (serial: {d.serial || 'N/A'})
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul className="text-sm">
+              {devices.map((d, i) => (
+                <li key={i}>
+                  <strong>{d.label}</strong> — {d.driver} (serial: {d.serial || 'N/A'})
+                </li>
+              ))}
+            </ul>
+            <label className="text-sm mt-2 flex items-center gap-2">
+              <span className="opacity-70">Active device</span>
+              <select
+                className="select select-bordered select-sm"
+                value={selectedDevice}
+                onChange={(e) => setSelectedDevice(parseInt(e.target.value))}
+              >
+                {devices.map((d, i) => (
+                  <option key={i} value={d.index ?? i}>
+                    [{d.index ?? i}] {d.label} ({d.driver})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="text-xs opacity-60 mt-1">Used for the next capture or monitor start.</p>
+          </>
         )}
         {deviceStatus && (
           <div className="mt-2 text-sm">
@@ -307,7 +368,7 @@ export function SDRPage() {
             />
           </label>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
           {monitorStatus?.status !== 'running' ? (
             <button className="btn btn-primary btn-sm" onClick={startMonitor}>
               Start Monitor
@@ -322,6 +383,13 @@ export function SDRPage() {
               </button>
             </>
           )}
+          <button
+            className="btn btn-outline btn-error btn-sm ml-auto"
+            onClick={stopAllMonitors}
+            title="Force-stop any monitor running on the server, including sessions started in another tab or browser that are still capturing."
+          >
+            Stop All Monitors
+          </button>
         </div>
         {monitorStatus && (
           <div className="mt-2 text-sm">

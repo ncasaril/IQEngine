@@ -54,6 +54,16 @@ export function SDRLivePage() {
   const [status, setStatus] = useState('idle');
   const [config, setConfig] = useState<SpectrumConfig | null>(null);
 
+  // Available SDR hardware + which one the next Start uses.
+  const [devices, setDevices] = useState<{ index?: number; label: string; driver: string }[]>([]);
+  const [selectedDevice, setSelectedDevice] = useState<number>(0);
+  useEffect(() => {
+    fetch('/api/sdr/devices')
+      .then((r) => (r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)))
+      .then((d) => setDevices(d.devices || []))
+      .catch(() => {});
+  }, []);
+
   // Display settings
   const [fftSize, setFftSize] = useState(4096);
   const [frameRate, setFrameRate] = useState(10);
@@ -120,6 +130,7 @@ export function SDRLivePage() {
         segment_duration_s: 0,
         max_segments: 0,
         rolling_window_s: form.rolling_window_s,
+        device_index: selectedDevice,
       };
       const resp = await fetch('/api/sdr/monitor/start', {
         method: 'POST',
@@ -138,7 +149,7 @@ export function SDRLivePage() {
       setError(e.message);
       setStatus('idle');
     }
-  }, [form]);
+  }, [form, selectedDevice]);
 
   const stop = useCallback(async () => {
     try {
@@ -148,6 +159,35 @@ export function SDRLivePage() {
     }
     setRunning(false);
     setStatus('stopped');
+  }, []);
+
+  const stopAll = useCallback(async () => {
+    setError('');
+    try {
+      const resp = await fetch('/api/sdr/monitor/stop-all', { method: 'POST' });
+      const d = await resp.json();
+      setStatus(d.count > 0 ? `stopped ${d.count} session(s)` : 'idle');
+    } catch (e: any) {
+      setError(e.message);
+    }
+    setRunning(false);
+    setSessionId(null);
+  }, []);
+
+  // On load, adopt a monitor that's already running (e.g. started from the SDR
+  // Control page or another tab) so the live spectrum/waterfall connect instead
+  // of showing a stale "Start" that would 409.
+  useEffect(() => {
+    fetch('/api/sdr/monitor/status')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d && d.status === 'running' && d.session_id) {
+          setSessionId(d.session_id);
+          setRunning(true);
+          setStatus('running');
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const retune = useCallback(async () => {
@@ -266,6 +306,24 @@ export function SDRLivePage() {
                   onChange={(e) => setForm({ ...form, rolling_window_s: parseFloat(e.target.value) })}
                 />
               </label>
+              {devices.length > 0 && (
+                <label className={labelSmall}>
+                  <span className="opacity-70">Device</span>
+                  <select
+                    className="select select-bordered select-sm w-full"
+                    value={selectedDevice}
+                    onChange={(e) => setSelectedDevice(parseInt(e.target.value))}
+                    disabled={running}
+                    title={running ? 'Stop the monitor to switch devices' : 'SDR used when you press Start'}
+                  >
+                    {devices.map((d, i) => (
+                      <option key={i} value={d.index ?? i}>
+                        [{d.index ?? i}] {d.label} ({d.driver})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <div className="flex gap-1 mt-1">
                 {!running ? (
                   <button className="btn btn-primary btn-sm flex-1" onClick={start}>
@@ -282,6 +340,13 @@ export function SDRLivePage() {
                   </>
                 )}
               </div>
+              <button
+                className="btn btn-outline btn-error btn-xs w-full mt-1"
+                onClick={stopAll}
+                title="Force-stop any monitor running on the server, including sessions started in another tab or on the SDR Control page."
+              >
+                Stop All Monitors
+              </button>
             </div>
           </details>
 

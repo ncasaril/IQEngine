@@ -476,7 +476,7 @@ class MonitorRunner:
 
         try:
             if not device.is_open:
-                device.open()
+                device.open(self.config.device_index)
             device.configure(self.config)
 
             self._rolling_buffer = RollingBuffer(
