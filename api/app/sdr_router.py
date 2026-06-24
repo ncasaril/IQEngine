@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -372,9 +372,12 @@ async def snapshot_monitor(req: SnapshotRequest):
     if samples.size == 0:
         raise HTTPException(status_code=400, detail="No samples available in the requested window")
 
+    actual_duration_s = samples.size / cfg_snap.sample_rate
+    capture_start = datetime.now(timezone.utc) - timedelta(seconds=req.offset_s + actual_duration_s)
+
     base_dir = os.getenv("IQENGINE_BACKEND_LOCAL_FILEPATH", os.path.join(os.getcwd(), "iqengine"))
     output_dir = os.path.join(base_dir, "sdr_captures")
-    basename = write_sigmf_recording(samples, cfg_snap, output_dir, "snapshot")
+    basename = write_sigmf_recording(samples, cfg_snap, output_dir, "snapshot", capture_time=capture_start)
     filepath = os.path.join("sdr_captures", basename)
 
     try:
