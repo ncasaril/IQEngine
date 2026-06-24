@@ -215,6 +215,32 @@ class MonitorRunner:
             self._thread.join(timeout=10)
         self._status = "stopped"
 
+    def force_stop(self):
+        """Brutally stop the monitor by closing the hardware device from the caller's thread.
+
+        Use when stop() has already timed out. Calling device.close() from outside the
+        monitor thread triggers deactivateStream() which interrupts any blocking readStream()
+        call in the C layer, unblocking the thread so its finally-block runs and releases
+        device_lock.
+        """
+        self._stop_event.set()
+        try:
+            get_device().close()
+        except Exception:
+            pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3)
+        if self._thread and self._thread.is_alive():
+            logger.error(f"Monitor thread {self.session_id} still alive after force_stop; releasing device_lock")
+            self._status = "error"
+            self._error = "Monitor thread could not be stopped — restart the service if device is still locked"
+            try:
+                get_device_lock().release()
+            except RuntimeError:
+                pass
+        else:
+            self._status = "stopped"
+
     def retune(self, center_freq: Optional[float] = None, gain: Optional[float] = None, sample_rate: Optional[float] = None):
         """Queue a retune command (applied at next segment boundary)."""
         cmd = {}

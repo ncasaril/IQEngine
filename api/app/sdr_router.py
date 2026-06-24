@@ -271,7 +271,7 @@ async def stop_monitor():
         raise HTTPException(status_code=404, detail="No active monitor session")
 
     session_id, runner = running[0]
-    runner.stop()
+    await asyncio.get_event_loop().run_in_executor(None, runner.stop)
     return {"session_id": session_id, "status": "stopped"}
 
 
@@ -285,9 +285,26 @@ async def stop_all_monitors():
     """
     monitors = get_active_monitors()
     running = [(mid, m) for mid, m in monitors.items() if m.status == "running"]
+    loop = asyncio.get_event_loop()
     for _, runner in running:
-        runner.stop()
+        await loop.run_in_executor(None, runner.stop)
     return {"stopped": [mid for mid, _ in running], "count": len(running)}
+
+
+@router.post("/monitor/kill-all")
+async def kill_all_monitors():
+    """Forcefully kill all monitor sessions by closing the hardware device.
+
+    Use when /monitor/stop-all has timed out or the service hung after a retune.
+    Closes the SoapySDR stream from the caller thread, which interrupts any
+    blocking readStream() call and lets the monitor thread exit via its finally-block.
+    """
+    monitors = get_active_monitors()
+    running = [(mid, m) for mid, m in monitors.items() if m.status == "running"]
+    loop = asyncio.get_event_loop()
+    for _, runner in running:
+        await loop.run_in_executor(None, runner.force_stop)
+    return {"killed": [mid for mid, _ in running], "count": len(running)}
 
 
 @router.post("/monitor/retune")

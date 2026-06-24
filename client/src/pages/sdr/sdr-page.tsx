@@ -190,6 +190,19 @@ export function SDRPage() {
     }
   };
 
+  const killAllMonitors = async () => {
+    setError('');
+    try {
+      const resp = await fetch('/api/sdr/monitor/kill-all', { method: 'POST' });
+      const data = await resp.json();
+      await fetchMonitorStatus();
+      refreshStatus();
+      setNotice(data.count > 0 ? `Force-killed ${data.count} monitor session(s).` : 'No monitors were running.');
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
   const retune = async () => {
     try {
       await fetch('/api/sdr/monitor/retune', {
@@ -389,6 +402,13 @@ export function SDRPage() {
             title="Force-stop any monitor running on the server, including sessions started in another tab or browser that are still capturing."
           >
             Stop All Monitors
+          </button>
+          <button
+            className="btn btn-error btn-sm"
+            onClick={killAllMonitors}
+            title="Last resort: closes the SDR hardware stream directly to unblock a stuck monitor thread. Use if Stop All Monitors hangs or the service is unresponsive after a retune."
+          >
+            Force Kill All
           </button>
         </div>
         {monitorStatus && (
