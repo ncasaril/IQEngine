@@ -270,15 +270,23 @@ class SoapySDRDevice(SDRDeviceBase):
         return self._device is not None
 
 
-def write_sigmf_recording(samples: np.ndarray, config: SDRConfig, output_dir: str, filename_prefix: str) -> str:
+def write_sigmf_recording(
+    samples: np.ndarray,
+    config: SDRConfig,
+    output_dir: str,
+    filename_prefix: str,
+    capture_time: Optional[datetime] = None,
+) -> str:
     """Write IQ samples as a SigMF recording pair (.sigmf-meta, .sigmf-data).
 
     Returns the base filepath (without extension) relative to output_dir's parent.
+    capture_time sets core:datetime (the start of the captured window); defaults to now.
     """
     os.makedirs(output_dir, exist_ok=True)
 
     now = datetime.now(timezone.utc)
-    ts = now.strftime("%Y%m%dT%H%M%S")
+    start_dt = capture_time if capture_time is not None else now
+    ts = start_dt.strftime("%Y%m%dT%H%M%S")
     freq_mhz = config.center_freq / 1e6
     rate_msps = config.sample_rate / 1e6
     basename = f"{filename_prefix}_{ts}_{freq_mhz:.0f}MHz_{rate_msps:.0f}Msps"
@@ -301,7 +309,7 @@ def write_sigmf_recording(samples: np.ndarray, config: SDRConfig, output_dir: st
             {
                 "core:sample_start": 0,
                 "core:frequency": config.center_freq,
-                "core:datetime": now.isoformat(),
+                "core:datetime": start_dt.isoformat(),
             }
         ],
         "annotations": [],
